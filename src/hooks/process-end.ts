@@ -23,10 +23,12 @@ export function setupProcessEndHook(pi: ExtensionAPI, manager: ProcessManager) {
     // Determine if the agent should get a turn to react to this process ending.
     // When true, the agent receives the message in its context and can respond
     // (e.g. check results, fix code, restart the process).
+    const groupedTurn = manager.hasTurnGroupForProcess(info.id);
     const triggerAgentTurn =
-      (info.status === "killed" && info.alertOnKill) ||
-      (info.status === "exited" && info.success && info.alertOnSuccess) ||
-      (info.status === "exited" && !info.success && info.alertOnFailure);
+      !groupedTurn &&
+      ((info.status === "killed" && info.alertOnKill) ||
+        (info.status === "exited" && info.success && info.alertOnSuccess) ||
+        (info.status === "exited" && !info.success && info.alertOnFailure));
 
     const runtime = formatRuntime(info.startTime, info.endTime);
 

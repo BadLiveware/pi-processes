@@ -15,6 +15,13 @@ import type {
 import type { ProcessManager } from "../../manager";
 import { executeClear } from "./clear";
 import { executeDebugPreview, renderDebugCall } from "./debug";
+import {
+  executeClearGroup,
+  executeListGroups,
+  executeMonitorGroup,
+  renderGroupCall,
+  renderGroupResult,
+} from "./group";
 import { executeKill, renderKillCall } from "./kill";
 import { executeList, renderListResult } from "./list";
 import { executeLogs, renderLogsCall, renderLogsResult } from "./logs";
@@ -43,6 +50,11 @@ interface ActionParams {
   logWatchUpdate?: LogWatchUpdate;
   watchAction?: "list" | "append" | "replace" | "remove" | "clear";
   watchIndexes?: number[];
+  processIds?: string[];
+  groupMode?: "all" | "any";
+  failFast?: boolean;
+  triggerTurn?: boolean;
+  groupId?: string;
   replayTailLines?: number;
   maxReplayMatches?: number;
   preview?: "start" | "list" | "output" | "logs" | "error";
@@ -70,6 +82,12 @@ export async function executeAction(
       return executeWrite(params, manager);
     case "update":
       return executeUpdate(params, manager);
+    case "monitorGroup":
+      return executeMonitorGroup(params, manager);
+    case "listGroups":
+      return executeListGroups(manager);
+    case "clearGroup":
+      return executeClearGroup(params, manager);
     case "debug_preview":
       if (!DEBUG_PREVIEW_ENABLED) {
         throw new Error(
@@ -103,6 +121,10 @@ export function renderActionCall(args: ActionParams, theme: Theme): Component {
       return renderWriteCall(args, theme);
     case "update":
       return renderUpdateCall(args, theme);
+    case "monitorGroup":
+    case "listGroups":
+    case "clearGroup":
+      return renderGroupCall(args, theme);
     case "debug_preview":
       return renderDebugCall(args, theme);
     default:
@@ -147,6 +169,10 @@ export function renderActionResult(
       return renderLogsResult(result, options, theme);
     case "update":
       return renderUpdateResult(result, options, theme);
+    case "monitorGroup":
+    case "listGroups":
+    case "clearGroup":
+      return renderGroupResult(result, options, theme);
     case "kill":
     case "write":
     case "clear":

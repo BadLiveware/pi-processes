@@ -23,6 +23,12 @@ import {
   type LogWatchStream,
   type LogWatchUpdate,
   type ManagerEvent,
+  type ProcessGroupClearResult,
+  type ProcessGroupMode,
+  type ProcessGroupMonitorInfo,
+  type ProcessGroupMonitorResult,
+  type ProcessGroupOutcome,
+  type ProcessGroupSummary,
   type ProcessInfo,
   type ProcessMetadataUpdate,
   type ProcessStatus,
@@ -54,13 +60,20 @@ interface ManagedProcess extends ProcessInfo {
   nextWatchIndex: number;
 }
 
+interface ManagedProcessGroupMonitor extends ProcessGroupMonitorInfo {}
+
+const MAX_GROUP_MONITORS = 100;
+const MAX_GROUP_PROCESS_IDS = 50;
+
 interface ProcessManagerOptions {
   getConfiguredShellPath?: () => string | undefined;
 }
 
 export class ProcessManager {
   private processes: Map<string, ManagedProcess> = new Map();
+  private groupMonitors: Map<string, ManagedProcessGroupMonitor> = new Map();
   private counter = 0;
+  private groupCounter = 0;
   private logDir: string;
   private events = new EventEmitter();
   private watcher: ReturnType<typeof setInterval> | null = null;
@@ -132,6 +145,7 @@ export class ProcessManager {
 
     if (next === "exited" || next === "killed") {
       this.emit({ type: "process_ended", info: this.toProcessInfo(managed) });
+      this.evaluateGroupMonitors(managed.id);
     }
 
     this.ensureWatcherRunning();
@@ -448,6 +462,126 @@ export class ProcessManager {
     };
   }
 
+  monitorGroup(
+    name: string,
+    processIds: string[],
+    options?: {
+      mode?: ProcessGroupMode;
+      failFast?: boolean;
+      triggerTurn?: boolean;
+    },
+  ): ProcessGroupMonitorResult {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      return {
+        ok: false,
+        reason: "invalid",
+        message: "name is required for monitorGroup",
+      };
+    }
+
+    if (!Array.isArray(processIds) || processIds.length === 0) {
+      return {
+        ok: false,
+        reason: "invalid",
+        message: "processIds must contain at least one process id",
+      };
+    }
+
+    const uniqueProcessIds = [...new Set(processIds.map((id) => id.trim()))];
+    if (uniqueProcessIds.some((id) => !id)) {
+      return {
+        ok: false,
+        reason: "invalid",
+        message: "processIds must be non-empty strings",
+      };
+    }
+
+    if (uniqueProcessIds.length > MAX_GROUP_PROCESS_IDS) {
+      return {
+        ok: false,
+        reason: "invalid",
+        message: `processIds must contain <= ${MAX_GROUP_PROCESS_IDS} unique process ids`,
+      };
+    }
+
+    if (this.groupMonitors.size >= MAX_GROUP_MONITORS) {
+      return {
+        ok: false,
+        reason: "invalid",
+        message: `At most ${MAX_GROUP_MONITORS} process group monitors can be active`,
+      };
+    }
+
+    const missing = uniqueProcessIds.filter((id) => !this.processes.has(id));
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        reason: "invalid",
+        message: `Unknown process id(s): ${missing.join(", ")}`,
+      };
+    }
+
+    const mode = options?.mode ?? "all";
+    if (mode !== "all" && mode !== "any") {
+      return {
+        ok: false,
+        reason: "invalid",
+        message: `Unsupported group mode: ${String(mode)}`,
+      };
+    }
+
+    const group: ManagedProcessGroupMonitor = {
+      id: `group_${++this.groupCounter}`,
+      name: trimmedName,
+      processIds: uniqueProcessIds,
+      mode,
+      failFast: mode === "all" ? (options?.failFast ?? true) : false,
+      triggerTurn: options?.triggerTurn ?? true,
+      createdAt: Date.now(),
+      triggeredAt: null,
+      outcome: null,
+      triggerProcessId: null,
+      summary: this.groupSummary(uniqueProcessIds),
+    };
+
+    this.groupMonitors.set(group.id, group);
+    const triggered = this.evaluateGroupMonitor(group);
+    if (!triggered) this.emit({ type: "processes_changed" });
+
+    return { ok: true, group: this.toGroupInfo(group) };
+  }
+
+  listGroups(): ProcessGroupMonitorInfo[] {
+    return Array.from(this.groupMonitors.values())
+      .map((group) => this.toGroupInfo(group))
+      .reverse();
+  }
+
+  hasTurnGroupForProcess(processId: string): boolean {
+    for (const group of this.groupMonitors.values()) {
+      if (group.triggerTurn && group.processIds.includes(processId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  clearGroup(idOrName: string): ProcessGroupClearResult {
+    const group = this.resolveGroup(idOrName);
+    if (!group) {
+      return {
+        ok: false,
+        reason: "not_found",
+        message: `Process group monitor not found: ${idOrName}`,
+      };
+    }
+
+    this.groupMonitors.delete(group.id);
+    this.emit({ type: "processes_changed" });
+    return { ok: true, group: this.toGroupInfo(group) };
+  }
+
   async kill(
     id: string,
     opts?: { signal?: NodeJS.Signals; timeoutMs?: number },
@@ -578,8 +712,12 @@ export class ProcessManager {
 
   clearFinished(): number {
     let cleared = 0;
+    const clearedIds = new Set<string>();
     for (const [id, managed] of this.processes) {
       if (LIVE_STATUSES.has(managed.status)) {
+        continue;
+      }
+      if (this.isReferencedByPendingGroup(id)) {
         continue;
       }
 
@@ -593,7 +731,12 @@ export class ProcessManager {
 
       this.clearOutputChangedState(id);
       this.processes.delete(id);
+      clearedIds.add(id);
       cleared++;
+    }
+
+    if (clearedIds.size > 0) {
+      this.clearGroupsReferencing(clearedIds);
     }
 
     if (cleared > 0) {
@@ -630,6 +773,7 @@ export class ProcessManager {
     }
     this.pendingOutputEmit.clear();
     this.lastOutputEmitAt.clear();
+    this.groupMonitors.clear();
 
     for (const p of this.processes.values()) {
       if (!LIVE_STATUSES.has(p.status)) continue;
@@ -940,6 +1084,163 @@ export class ProcessManager {
           },
         });
       }
+    }
+  }
+
+  private evaluateGroupMonitors(processId: string): void {
+    for (const group of this.groupMonitors.values()) {
+      if (!group.processIds.includes(processId)) continue;
+      this.evaluateGroupMonitor(group);
+    }
+  }
+
+  private evaluateGroupMonitor(group: ManagedProcessGroupMonitor): boolean {
+    if (group.triggeredAt) return false;
+
+    const outcome = this.groupOutcome(group);
+    if (!outcome) {
+      group.summary = this.groupSummary(group.processIds);
+      return false;
+    }
+
+    group.outcome = outcome.outcome;
+    group.triggerProcessId = outcome.triggerProcessId;
+    group.triggeredAt = Date.now();
+    group.summary = this.groupSummary(group.processIds);
+    this.emit({
+      type: "process_group_monitor_triggered",
+      group: this.toGroupInfo(group),
+    });
+    this.emit({ type: "processes_changed" });
+    return true;
+  }
+
+  private groupOutcome(
+    group: ManagedProcessGroupMonitor,
+  ): { outcome: ProcessGroupOutcome; triggerProcessId: string | null } | null {
+    const processes = group.processIds.map((id) => this.processes.get(id));
+
+    if (group.mode === "any") {
+      const endedIndex = processes.findIndex(
+        (process) => process && !LIVE_STATUSES.has(process.status),
+      );
+      if (endedIndex === -1) return null;
+      const process = processes[endedIndex];
+      if (!process) return null;
+      return {
+        outcome: this.isFailedGroupMember(process)
+          ? "any_failed"
+          : "any_succeeded",
+        triggerProcessId: process.id,
+      };
+    }
+
+    if (group.failFast) {
+      const failed = processes.find(
+        (process) => process && this.isFailedGroupMember(process),
+      );
+      if (failed) {
+        return { outcome: "any_failed", triggerProcessId: failed.id };
+      }
+    }
+
+    const allEnded = processes.every(
+      (process) => process && !LIVE_STATUSES.has(process.status),
+    );
+    if (!allEnded) return null;
+
+    const allSucceeded = processes.every(
+      (process) => process?.status === "exited" && process.success === true,
+    );
+
+    return {
+      outcome: allSucceeded ? "all_succeeded" : "all_exited",
+      triggerProcessId: null,
+    };
+  }
+
+  private isFailedGroupMember(process: ManagedProcess): boolean {
+    return (
+      process.status === "killed" ||
+      (process.status === "exited" && process.success === false)
+    );
+  }
+
+  private groupSummary(processIds: string[]): ProcessGroupSummary {
+    const summary: ProcessGroupSummary = {
+      total: processIds.length,
+      running: 0,
+      succeeded: 0,
+      failed: 0,
+      killed: 0,
+    };
+
+    for (const id of processIds) {
+      const process = this.processes.get(id);
+      if (!process) {
+        summary.failed++;
+        continue;
+      }
+      if (LIVE_STATUSES.has(process.status)) {
+        summary.running++;
+      } else if (process.status === "killed") {
+        summary.killed++;
+      } else if (process.success) {
+        summary.succeeded++;
+      } else {
+        summary.failed++;
+      }
+    }
+
+    return summary;
+  }
+
+  private toGroupInfo(
+    group: ManagedProcessGroupMonitor,
+  ): ProcessGroupMonitorInfo {
+    group.summary = this.groupSummary(group.processIds);
+    return {
+      ...group,
+      processIds: [...group.processIds],
+      summary: { ...group.summary },
+    };
+  }
+
+  private resolveGroup(idOrName: string): ManagedProcessGroupMonitor | null {
+    const trimmed = idOrName.trim();
+    if (!trimmed) return null;
+    const byId = this.groupMonitors.get(trimmed);
+    if (byId) return byId;
+    return (
+      Array.from(this.groupMonitors.values()).find(
+        (group) => group.name === trimmed,
+      ) ?? null
+    );
+  }
+
+  private isReferencedByPendingGroup(processId: string): boolean {
+    for (const group of this.groupMonitors.values()) {
+      if (!group.triggeredAt && group.processIds.includes(processId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private clearGroupsReferencing(processIds: Set<string>): void {
+    for (const [id, group] of this.groupMonitors) {
+      const referencesClearedProcess = group.processIds.some((processId) =>
+        processIds.has(processId),
+      );
+      if (!referencesClearedProcess) continue;
+
+      const hasLiveMember = group.processIds.some((processId) => {
+        const process = this.processes.get(processId);
+        return process ? LIVE_STATUSES.has(process.status) : false;
+      });
+      if (hasLiveMember) continue;
+
+      this.groupMonitors.delete(id);
     }
   }
 

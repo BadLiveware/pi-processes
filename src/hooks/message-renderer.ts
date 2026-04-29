@@ -5,6 +5,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { MESSAGE_TYPE_PROCESS_UPDATE } from "../constants";
+import type { ProcessGroupMonitorDetails } from "./process-group";
 
 interface ProcessLifecycleDetails {
   kind?: "lifecycle";
@@ -35,7 +36,10 @@ interface ProcessWatchMatchDetails {
 interface ProcessUpdateMessage {
   customType: string;
   content: string | Array<{ type: string; text?: string }>;
-  details?: ProcessLifecycleDetails | ProcessWatchMatchDetails;
+  details?:
+    | ProcessLifecycleDetails
+    | ProcessWatchMatchDetails
+    | ProcessGroupMonitorDetails;
 }
 
 function getContentText(
@@ -52,7 +56,9 @@ function getContentText(
 
 export function setupMessageRenderer(pi: ExtensionAPI) {
   pi.registerMessageRenderer<
-    ProcessLifecycleDetails | ProcessWatchMatchDetails
+    | ProcessLifecycleDetails
+    | ProcessWatchMatchDetails
+    | ProcessGroupMonitorDetails
   >(
     MESSAGE_TYPE_PROCESS_UPDATE,
     (
@@ -76,6 +82,24 @@ export function setupMessageRenderer(pi: ExtensionAPI) {
           theme.fg("muted", `/${details.watch.pattern}/ `) +
           theme.fg(streamColor, `[${details.source}]`) +
           theme.fg("muted", ` ${details.line}`);
+
+        return new Text(text, 0, 0);
+      }
+
+      if (details.kind === "group_monitor") {
+        const group = details.group;
+        const failed = group.summary.failed + group.summary.killed;
+        const color = failed > 0 ? "error" : "success";
+        const icon = failed > 0 ? "\u2717" : "\u2713";
+        const text =
+          theme.fg(color, `${icon} `) +
+          theme.fg("accent", `group "${group.name}"`) +
+          theme.fg("muted", ` (${group.id}) `) +
+          theme.fg(color, group.outcome ?? "triggered") +
+          theme.fg(
+            "muted",
+            ` ${group.summary.succeeded}/${group.summary.total} ok, ${failed} failed ${details.runtime}`,
+          );
 
         return new Text(text, 0, 0);
       }
