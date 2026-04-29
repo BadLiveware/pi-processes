@@ -16,6 +16,7 @@ Use this skill when work needs a long-running command to stay alive while Pi con
 - Do not run `sleep`, wait loops, or repeated `output` calls just to give the process time; configure `alertOnSuccess`, `alertOnFailure`, `logWatches`, or `monitorGroup` and let Pi notify you.
 - If no independent work remains, tell the user the process is monitored and stop the turn instead of sleeping.
 - Inspect output or log files only when needed.
+- For external async systems with their own watch command, run that watch command under `process` with lifecycle alerts. Example: `gh run watch <run-id> --exit-status` with `alertOnSuccess: true` and `alertOnFailure: true`; let the CLI own remote waiting and Pi own monitoring/notification.
 - If several processes belong to one workflow, use `monitorGroup` instead of polling `list`/`output`: `groupMode: "all"` for WhenAll-style completion, `groupMode: "any"` for WhenAny-style completion. With `triggerTurn: true`, the group gives one aggregate lifecycle follow-up instead of separate per-process completion/failure turns.
 - If watches or alert flags are wrong, use `process` action `update` instead of polling or restarting expensive work.
 - Kill and clear processes when they are no longer useful.
@@ -27,16 +28,36 @@ Use this skill when work needs a long-running command to stay alive while Pi con
 - `pnpm test --watch`
 - `tail -f <logfile>`
 - local preview or build watchers
+- provider-native watch commands such as `gh run watch <run-id> --exit-status`
 
 ## Typical flow
 
 1. Start the long-running command with a clear name.
 2. Add alert flags or log watches for the condition that should bring you back.
-3. For multiple related processes, register `monitorGroup` over their process IDs.
-4. Continue the main task, or stop the turn if there is no useful independent work.
-5. Inspect `output` or `logs` only when something needs attention.
-6. Use `update` to add, replace, remove, clear, or replay log watches when the original watch config was missing, noisy, or wrong.
-7. Kill and clear processes or group monitors when done.
+3. For an external async operation, prefer the provider's watch CLI as the command when available, e.g. `gh run watch <run-id> --exit-status`.
+4. For multiple related processes, register `monitorGroup` over their process IDs.
+5. Continue the main task, or stop the turn if there is no useful independent work.
+6. Inspect `output` or `logs` only when something needs attention.
+7. Use `update` to add, replace, remove, clear, or replay log watches when the original watch config was missing, noisy, or wrong.
+8. Kill and clear processes or group monitors when done.
+
+## Provider-native Watch Commands
+
+When an external service already provides a blocking watch command, run that command as a managed process instead of polling the service yourself. The external CLI handles remote status transitions; Pi handles non-blocking process monitoring and follow-up turns.
+
+Example: monitor a GitHub Actions run without agent polling:
+
+```json
+{
+  "action": "start",
+  "name": "watch-main-ci-before-release",
+  "command": "gh run watch 25127985114 --exit-status",
+  "alertOnSuccess": true,
+  "alertOnFailure": true
+}
+```
+
+After starting it, continue independent work or stop the turn. React when the process exits successfully or fails.
 
 ## Anti-pattern to Avoid
 

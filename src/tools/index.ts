@@ -276,6 +276,8 @@ Important: You DON'T need to poll, sleep, or wait for processes. Notifications a
 
 Never run bash sleep or a wait loop just to give a managed process time. Use alertOnSuccess, alertOnFailure, logWatches, or monitorGroup instead.
 
+For external async systems with provider-native watch commands, run the watch command as a managed process with lifecycle alerts instead of polling from the agent. Example: 'gh run watch <run-id> --exit-status' with alertOnSuccess and alertOnFailure.
+
 For multiple processes, use monitorGroup instead of polling list/output. Use groupMode='all' for Task.WhenAll-style workflows and groupMode='any' for Task.WhenAny-style workflows. With triggerTurn=true, the group owns lifecycle follow-up turns for member processes so the agent gets one aggregate notification.
 
 Note: User always sees process updates in the UI. The notify flags and group monitors control whether YOU (the agent) get a turn to react (e.g. check results, fix code, restart).`,
@@ -286,6 +288,7 @@ Note: User always sees process updates in the UI. The notify flags and group mon
       "Avoid shell background patterns such as &, nohup, disown, or setsid when the process tool fits.",
       "After starting a process, continue other work instead of waiting for it; if no independent work remains, stop the turn and rely on watch/exit notifications.",
       "Never run bash sleep, timeout-wrapped sleep, or a shell wait loop just to give a managed process time.",
+      "For external async systems that provide a watch command, run that command under process with lifecycle alerts instead of polling, e.g. gh run watch <run-id> --exit-status.",
       "For multiple related processes, register a monitorGroup instead of polling list/output; use groupMode:'all' for WhenAll-style completion and groupMode:'any' for WhenAny-style completion.",
       "After process start with alertOnSuccess, alertOnFailure, or logWatches, do not repeatedly call process output just to wait; do at most one quick sanity check, then continue independent work or stop until a notification/watch event or concrete next step needs logs.",
       "If a running process has missing, wrong, or noisy logWatches, use process action:'update' to append, replace, remove, or clear watches instead of polling output or restarting the process.",

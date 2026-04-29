@@ -170,6 +170,20 @@ If Pi starts a long-running process with missing, noisy, or incorrect watches, i
 
 Agents should not run `sleep`, timeout-wrapped `sleep`, or shell wait loops just to give a managed process time. If completion or a marker matters, start or update the process with `alertOnSuccess`, `alertOnFailure`, `logWatches`, or a process group monitor; then continue other work, or stop the turn and let the notification bring the agent back.
 
+When an external async system has its own watch command, Pi should run that watch command as a managed process instead of polling the service from the agent. The provider CLI owns remote status transitions; `pi-processes` owns non-blocking monitoring, output capture, and lifecycle notification.
+
+Example: watch a GitHub Actions run until it succeeds or fails
+
+```json
+{
+  "action": "start",
+  "name": "watch-main-ci-before-release",
+  "command": "gh run watch 25127985114 --exit-status",
+  "alertOnSuccess": true,
+  "alertOnFailure": true
+}
+```
+
 Example: replace noisy watches and replay recent output
 
 ```json

@@ -6,6 +6,6 @@ Add agent-facing process metadata updates. The `process` tool can now update mut
 
 Show active watch and alert indicators in both the process cards/list output and the persistent log dock above the prompt, so monitored long-running commands remain visibly monitored while agents continue working.
 
-Strengthen agent guidance so managed processes use alert/watch/group notifications instead of blocking the agent with `sleep`, wait loops, or repeated output polling.
+Strengthen agent guidance so managed processes use alert/watch/group notifications instead of blocking the agent with `sleep`, wait loops, or repeated output polling. Promote provider-native watch commands, such as `gh run watch <run-id> --exit-status`, as managed processes so external async status checks avoid agent-side polling.
 
 Add aggregate process group monitors for WhenAll/WhenAny-style workflows over existing process IDs, including fail-fast all-mode notifications and group progress inspection.
