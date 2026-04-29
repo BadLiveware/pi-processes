@@ -168,6 +168,8 @@ Invalid regex patterns fail fast at process start with a clear error.
 
 If Pi starts a long-running process with missing, noisy, or incorrect watches, it can update the process metadata later without restarting the process. The `process` tool `update` action can change alert flags and list, append, replace, remove, or clear log watches. When adding or replacing watches after output may have already passed the relevant marker, Pi can use `replayTailLines` to scan a small tail of recent output once. Replay is intentionally bounded: `replayTailLines` must be at most `10000`, and `maxReplayMatches` must be at most `200`.
 
+Agents should not run `sleep`, timeout-wrapped `sleep`, or shell wait loops just to give a managed process time. If completion or a marker matters, start or update the process with `alertOnSuccess`, `alertOnFailure`, or `logWatches`; then continue other work, or stop the turn and let the watch/exit notification bring the agent back.
+
 Example: replace noisy watches and replay recent output
 
 ```json

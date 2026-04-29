@@ -232,7 +232,9 @@ ${
     ? "- debug_preview: Temporary renderer preview for process tool UIs (no process side effects)\n  - preview: start | list | output | logs | error (default: start)\n"
     : ""
 }
-Important: You DON'T need to poll or wait for processes. Notifications arrive automatically based on your preferences. Start processes and continue with other work - you'll be informed if something requires attention.
+Important: You DON'T need to poll, sleep, or wait for processes. Notifications arrive automatically based on your preferences. Start processes and continue with other work. If no independent work remains, end the turn and let watch/exit notifications bring you back.
+
+Never run bash sleep or a wait loop just to give a managed process time. Use alertOnSuccess, alertOnFailure, and logWatches instead.
 
 Note: User always sees process updates in the UI. The notify flags control whether YOU (the agent) get a turn to react (e.g. check results, fix code, restart).`,
     promptSnippet:
@@ -240,8 +242,9 @@ Note: User always sees process updates in the UI. The notify flags control wheth
     promptGuidelines: [
       "Use the process tool for long-running commands such as dev servers, test watchers, build watchers, and log tails instead of bash.",
       "Avoid shell background patterns such as &, nohup, disown, or setsid when the process tool fits.",
-      "After starting a process, continue other work instead of waiting for it.",
-      "After process start with alertOnSuccess, alertOnFailure, or logWatches, do not repeatedly call process output just to wait; do at most one quick sanity check, then continue independent work until a notification/watch event or a concrete next step needs logs.",
+      "After starting a process, continue other work instead of waiting for it; if no independent work remains, stop the turn and rely on watch/exit notifications.",
+      "Never run bash sleep, timeout-wrapped sleep, or a shell wait loop just to give a managed process time.",
+      "After process start with alertOnSuccess, alertOnFailure, or logWatches, do not repeatedly call process output just to wait; do at most one quick sanity check, then continue independent work or stop until a notification/watch event or concrete next step needs logs.",
       "If a running process has missing, wrong, or noisy logWatches, use process action:'update' to append, replace, remove, or clear watches instead of polling output or restarting the process.",
       "If you add or replace watches after relevant output may have already appeared, use a small replayTailLines value instead of repeatedly polling process output.",
       "Use process output for targeted inspection after a watch/alert, after the user asks for status, or when a concrete next step depends on current logs.",

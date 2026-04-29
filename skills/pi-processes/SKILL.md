@@ -13,6 +13,8 @@ Use this skill when work needs a long-running command to stay alive while Pi con
 - Avoid shell background patterns when the process tool fits.
 - Give processes stable, clear names.
 - Continue the task after starting a process instead of waiting on it.
+- Do not run `sleep`, wait loops, or repeated `output` calls just to give the process time; configure `alertOnSuccess`, `alertOnFailure`, or `logWatches` and let Pi notify you.
+- If no independent work remains, tell the user the process is monitored and stop the turn instead of sleeping.
 - Inspect output or log files only when needed.
 - If watches or alert flags are wrong, use `process` action `update` instead of polling or restarting expensive work.
 - Kill and clear processes when they are no longer useful.
@@ -28,11 +30,25 @@ Use this skill when work needs a long-running command to stay alive while Pi con
 ## Typical flow
 
 1. Start the long-running command with a clear name.
-2. Continue the main task.
-3. Inspect `output` or `logs` if something needs attention.
-4. Use alert flags when success or failure should trigger a follow-up turn.
+2. Add alert flags or log watches for the condition that should bring you back.
+3. Continue the main task, or stop the turn if there is no useful independent work.
+4. Inspect `output` or `logs` only when something needs attention.
 5. Use `update` to add, replace, remove, clear, or replay log watches when the original watch config was missing, noisy, or wrong.
 6. Kill and clear the process when done.
+
+## Anti-pattern to Avoid
+
+Do not do this after `process` starts a monitored command:
+
+```bash
+sleep 150; true
+```
+
+That blocks the agent instead of using Pi's monitoring. Prefer:
+
+1. Start with `alertOnSuccess: true` when completion matters, or add a `logWatch` for the marker that matters.
+2. Do at most one quick `output` sanity check if it changes your next action.
+3. Continue other work, or stop and wait for the watch/exit notification.
 
 ## Notes
 
