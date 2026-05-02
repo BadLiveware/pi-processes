@@ -182,6 +182,12 @@ export function executeStart(
     };
   }
 
+  const hasMonitoring =
+    (params.logWatches && params.logWatches.length > 0) ||
+    params.alertOnSuccess === true ||
+    params.alertOnFailure === true ||
+    params.alertOnKill === true;
+
   const message = [
     `Started "${proc.name}" (${proc.id}, PID: ${proc.pid})`,
     "Log files:",
@@ -191,8 +197,8 @@ export function executeStart(
     params.logWatches && params.logWatches.length > 0
       ? `Watches active: ${params.logWatches.length}. Continue other work, or stop the turn if nothing else is useful; do not run sleep to wait. Watch/exit notifications will trigger follow-up.`
       : undefined,
-    !params.logWatches || params.logWatches.length === 0
-      ? "If completion or a marker should bring you back, make sure alertOnSuccess or logWatches are set instead of sleeping or polling."
+    !hasMonitoring
+      ? "If completion or a marker should bring you back, make sure alertOnSuccess, alertOnFailure, alertOnKill, or logWatches are set instead of sleeping or polling."
       : undefined,
   ]
     .filter(Boolean)
