@@ -1,6 +1,7 @@
 // Shell AST helpers. Duplicated from pi-toolchain since cross-extension imports are not allowed.
 
 import type {
+  ArithExpr,
   Command,
   Program,
   SimpleCommand,
@@ -27,16 +28,48 @@ function partToString(part: WordPart): string {
       return part.value;
     case "DblQuoted":
       return part.parts.map(partToString).join("");
-    case "ParamExp":
-      return part.short
-        ? `$${part.param.value}`
-        : `\${${part.param.value}${part.op ?? ""}${part.value ? wordToString(part.value) : ""}}`;
+    case "ParamExp": {
+      const parameter = `${part.length ? "#" : ""}${part.excl ? "!" : ""}${part.param.value}${part.index ? `[${wordToString(part.index)}]` : ""}`;
+      if (part.short) return `$${parameter}`;
+      const expansion = part.exp
+        ? `${part.exp.op}${part.exp.word ? wordToString(part.exp.word) : ""}`
+        : "";
+      const slice = part.slice
+        ? `:${wordToString(part.slice.offset)}${part.slice.length ? `:${wordToString(part.slice.length)}` : ""}`
+        : "";
+      const replacement = part.replace
+        ? `${part.replace.all ? "//" : "/"}${part.replace.prefix ? "#" : part.replace.suffix ? "%" : ""}${wordToString(part.replace.orig)}/${part.replace.with ? wordToString(part.replace.with) : ""}`
+        : "";
+      return `\${${parameter}${slice}${expansion}${replacement}}`;
+    }
     case "CmdSubst":
       return "$(...)";
     case "ArithExp":
-      return `$((${part.expr}))`;
+      return `$((${arithmeticToString(part.x)}))`;
     case "ProcSubst":
       return `${part.op}(...)`;
+    case "BraceExp":
+      return `{${part.elems.map(wordToString).join(part.sequence ? ".." : ",")}}`;
+    case "ExtGlob":
+      return `${part.op}${part.pattern})`;
+  }
+}
+
+function arithmeticToString(expression: ArithExpr): string {
+  switch (expression.type) {
+    case "ArithLit":
+      return expression.value;
+    case "ParamExp":
+      return partToString(expression);
+    case "BinaryArithm":
+      return `${arithmeticToString(expression.x)} ${expression.op} ${arithmeticToString(expression.y)}`;
+    case "UnaryArithm":
+      if (expression.post) {
+        return `${arithmeticToString(expression.x)}${expression.op}`;
+      }
+      return `${expression.op}${arithmeticToString(expression.x)}`;
+    case "ParenArithm":
+      return `(${arithmeticToString(expression.x)})`;
   }
 }
 
