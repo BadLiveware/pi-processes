@@ -582,3 +582,191 @@ describe("process_watch_matched", () => {
     expect(manager.getLogFiles(info.id)?.combinedFile).toBe(info.combinedFile);
   });
 });
+
+describe("process group monitors", () => {
+  let manager: ProcessManager;
+
+  afterEach(() => {
+    manager.cleanup();
+  });
+
+  it("notifies once when all monitored processes succeed", async () => {
+    manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const first = manager.start("first", "bash -c 'sleep 0.1; exit 0'", "/tmp");
+    const second = manager.start(
+      "second",
+      "bash -c 'sleep 0.1; exit 0'",
+      "/tmp",
+    );
+
+    const group = manager.monitorGroup("all-ok", [first.id, second.id], {
+      mode: "all",
+      failFast: true,
+    });
+
+    expect(group.ok).toBe(true);
+    await Promise.all([
+      waitForEnd(manager, first.id),
+      waitForEnd(manager, second.id),
+    ]);
+
+    const groupEvents = events.filter(
+      (event) => event.type === "process_group_monitor_triggered",
+    );
+    expect(groupEvents).toHaveLength(1);
+    const [event] = groupEvents;
+    if (event?.type === "process_group_monitor_triggered") {
+      expect(event.group.outcome).toBe("all_succeeded");
+      expect(event.group.summary).toMatchObject({
+        total: 2,
+        running: 0,
+        succeeded: 2,
+        failed: 0,
+        killed: 0,
+      });
+    }
+  });
+
+  it("supports fail-fast all-mode monitors", async () => {
+    manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const failed = manager.start(
+      "failed",
+      "bash -c 'sleep 0.1; exit 2'",
+      "/tmp",
+    );
+    const slow = manager.start("slow", "bash -c 'sleep 0.4; exit 0'", "/tmp");
+
+    const group = manager.monitorGroup("fail-fast", [failed.id, slow.id], {
+      mode: "all",
+      failFast: true,
+    });
+
+    expect(group.ok).toBe(true);
+    await waitForEnd(manager, failed.id);
+
+    const firstGroupEvents = events.filter(
+      (event) => event.type === "process_group_monitor_triggered",
+    );
+    expect(firstGroupEvents).toHaveLength(1);
+    const [event] = firstGroupEvents;
+    if (event?.type === "process_group_monitor_triggered") {
+      expect(event.group.outcome).toBe("any_failed");
+      expect(event.group.triggerProcessId).toBe(failed.id);
+      expect(event.group.summary.running).toBe(1);
+    }
+
+    await waitForEnd(manager, slow.id);
+    const allGroupEvents = events.filter(
+      (event) => event.type === "process_group_monitor_triggered",
+    );
+    expect(allGroupEvents).toHaveLength(1);
+  });
+
+  it("supports any-mode monitors", async () => {
+    manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const first = manager.start("first", "bash -c 'sleep 0.1; exit 0'", "/tmp");
+    const second = manager.start(
+      "second",
+      "bash -c 'sleep 0.4; exit 0'",
+      "/tmp",
+    );
+
+    const group = manager.monitorGroup("first-done", [first.id, second.id], {
+      mode: "any",
+    });
+
+    expect(group.ok).toBe(true);
+    await waitForEnd(manager, first.id);
+
+    const groupEvents = events.filter(
+      (event) => event.type === "process_group_monitor_triggered",
+    );
+    expect(groupEvents).toHaveLength(1);
+    const [event] = groupEvents;
+    if (event?.type === "process_group_monitor_triggered") {
+      expect(event.group.outcome).toBe("any_succeeded");
+      expect(event.group.triggerProcessId).toBe(first.id);
+    }
+  });
+
+  it("keeps finished process records needed by pending all-mode monitors", async () => {
+    manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const fast = manager.start("fast", "bash -c 'sleep 0.1; exit 0'", "/tmp");
+    const slow = manager.start("slow", "bash -c 'sleep 0.4; exit 0'", "/tmp");
+
+    const group = manager.monitorGroup("clear-safe", [fast.id, slow.id], {
+      mode: "all",
+      failFast: false,
+    });
+
+    expect(group.ok).toBe(true);
+    await waitForEnd(manager, fast.id);
+    expect(manager.clearFinished()).toBe(0);
+    expect(manager.get(fast.id)).not.toBeNull();
+
+    await waitForEnd(manager, slow.id);
+    const groupEvents = events.filter(
+      (event) => event.type === "process_group_monitor_triggered",
+    );
+    expect(groupEvents).toHaveLength(1);
+    expect(manager.clearFinished()).toBe(2);
+  });
+
+  it("keeps triggered fail-fast groups while members still run", async () => {
+    manager = new ProcessManager();
+    const failed = manager.start(
+      "failed",
+      "bash -c 'sleep 0.1; exit 2'",
+      "/tmp",
+    );
+    const slow = manager.start("slow", "bash -c 'sleep 0.4; exit 2'", "/tmp");
+
+    const group = manager.monitorGroup(
+      "fail-fast-owner",
+      [failed.id, slow.id],
+      {
+        mode: "all",
+        failFast: true,
+      },
+    );
+
+    expect(group.ok).toBe(true);
+    await waitForEnd(manager, failed.id);
+    expect(manager.listGroups()[0]?.outcome).toBe("any_failed");
+    expect(manager.clearFinished()).toBe(1);
+    expect(manager.hasTurnGroupForProcess(slow.id)).toBe(true);
+
+    await waitForEnd(manager, slow.id);
+    expect(manager.clearFinished()).toBe(1);
+    expect(manager.listGroups()).toHaveLength(0);
+  });
+
+  it("marks grouped processes as owned by aggregate turn notifications", () => {
+    manager = new ProcessManager();
+    const proc = manager.start("proc", "cat", "/tmp");
+
+    const group = manager.monitorGroup("turn-owner", [proc.id], {
+      mode: "any",
+    });
+
+    expect(group.ok).toBe(true);
+    expect(manager.hasTurnGroupForProcess(proc.id)).toBe(true);
+    if (group.ok) manager.clearGroup(group.group.id);
+    expect(manager.hasTurnGroupForProcess(proc.id)).toBe(false);
+  });
+
+  it("rejects missing process ids", () => {
+    manager = new ProcessManager();
+
+    const group = manager.monitorGroup("missing", ["proc_missing"]);
+
+    expect(group.ok).toBe(false);
+    if (!group.ok) {
+      expect(group.message).toContain("Unknown process id");
+    }
+  });
+});

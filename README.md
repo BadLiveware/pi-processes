@@ -168,6 +168,22 @@ Invalid regex patterns fail fast at process start with a clear error.
 
 If Pi starts a long-running process with missing, noisy, or incorrect watches, it can update the process metadata later without restarting the process. The `process` tool `update` action can change alert flags and list, append, replace, remove, or clear log watches. When adding or replacing watches after output may have already passed the relevant marker, Pi can use `replayTailLines` to scan a small tail of recent output once. Replay is intentionally bounded: `replayTailLines` must be at most `10000`, and `maxReplayMatches` must be at most `200`.
 
+Agents should not run `sleep`, timeout-wrapped `sleep`, or shell wait loops just to give a managed process time. If completion or a marker matters, start or update the process with `alertOnSuccess`, `alertOnFailure`, `logWatches`, or a process group monitor; then continue other work, or stop the turn and let the notification bring the agent back.
+
+When an external async system has its own watch command, Pi should run that watch command as a managed process instead of polling the service from the agent. The provider CLI owns remote status transitions; `pi-processes` owns non-blocking monitoring, output capture, and lifecycle notification.
+
+Example: watch a GitHub Actions run until it succeeds or fails
+
+```json
+{
+  "action": "start",
+  "name": "watch-main-ci-before-release",
+  "command": "gh run watch 25127985114 --exit-status",
+  "alertOnSuccess": true,
+  "alertOnFailure": true
+}
+```
+
 Example: replace noisy watches and replay recent output
 
 ```json
@@ -184,6 +200,39 @@ Example: replace noisy watches and replay recent output
   }
 }
 ```
+
+## Aggregate process monitors
+
+Use `monitorGroup` when several managed processes belong to one workflow and the agent needs one aggregate notification instead of sleeping or polling.
+
+- `groupMode: "all"` is for WhenAll-style workflows. It notifies when all processes exit, and `failFast` defaults to `true` so the group notifies on the first failed or killed process.
+- `groupMode: "any"` is for WhenAny-style workflows. It notifies when the first process exits.
+- `triggerTurn` defaults to `true`; set it to `false` only when the UI notification is enough and the agent does not need to react. With `triggerTurn: true`, the group owns lifecycle follow-up turns for member processes so Pi avoids duplicate per-process completion/failure turns.
+
+Example: monitor a profiling suite until all succeed or one fails
+
+```json
+{
+  "action": "monitorGroup",
+  "name": "profile-suite",
+  "processIds": ["proc_1", "proc_2", "proc_3"],
+  "groupMode": "all",
+  "failFast": true
+}
+```
+
+Example: monitor the first result from several alternatives
+
+```json
+{
+  "action": "monitorGroup",
+  "name": "first-profile-result",
+  "processIds": ["proc_1", "proc_2", "proc_3"],
+  "groupMode": "any"
+}
+```
+
+Use `listGroups` to inspect group progress and `clearGroup` with a group ID or name when the monitor is no longer useful.
 
 ## Troubleshooting
 

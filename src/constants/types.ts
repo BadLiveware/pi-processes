@@ -10,6 +10,9 @@ export type ProcessAction =
   | "clear"
   | "write"
   | "update"
+  | "monitorGroup"
+  | "listGroups"
+  | "clearGroup"
   | "debug_preview";
 
 export type ProcessStatus =
@@ -71,6 +74,36 @@ export interface ProcessMetadataUpdate {
   logWatchUpdate?: LogWatchUpdate;
 }
 
+export type ProcessGroupMode = "all" | "any";
+
+export type ProcessGroupOutcome =
+  | "all_succeeded"
+  | "all_exited"
+  | "any_succeeded"
+  | "any_failed";
+
+export interface ProcessGroupSummary {
+  total: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  killed: number;
+}
+
+export interface ProcessGroupMonitorInfo {
+  id: string;
+  name: string;
+  processIds: string[];
+  mode: ProcessGroupMode;
+  failFast: boolean;
+  triggerTurn: boolean;
+  createdAt: number;
+  triggeredAt: number | null;
+  outcome: ProcessGroupOutcome | null;
+  triggerProcessId: string | null;
+  summary: ProcessGroupSummary;
+}
+
 export interface ProcessInfo {
   id: string;
   name: string;
@@ -111,6 +144,7 @@ export type ManagerEvent =
   | { type: "process_ended"; info: ProcessInfo }
   | { type: "process_output_changed"; id: string }
   | { type: "process_watch_matched"; match: LogWatchMatchEvent }
+  | { type: "process_group_monitor_triggered"; group: ProcessGroupMonitorInfo }
   | { type: "processes_changed" };
 
 export type KillResult =
@@ -139,6 +173,14 @@ export type ProcessUpdateResult =
       watches?: LogWatchInfo[];
     };
 
+export type ProcessGroupMonitorResult =
+  | { ok: true; group: ProcessGroupMonitorInfo }
+  | { ok: false; reason: "invalid"; message: string };
+
+export type ProcessGroupClearResult =
+  | { ok: true; group: ProcessGroupMonitorInfo }
+  | { ok: false; reason: "not_found"; message: string };
+
 export interface StartOptions {
   alertOnSuccess?: boolean;
   alertOnFailure?: boolean;
@@ -152,6 +194,8 @@ export interface ProcessesDetails {
   message: string;
   process?: ProcessInfo;
   processes?: ProcessInfo[];
+  group?: ProcessGroupMonitorInfo;
+  groups?: ProcessGroupMonitorInfo[];
   output?: { stdout: string[]; stderr: string[]; status: string };
   logFiles?: { stdoutFile: string; stderrFile: string; combinedFile: string };
   watches?: LogWatchInfo[];

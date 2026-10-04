@@ -181,7 +181,7 @@ export function executeOutput(
   const outputParts: string[] = [message];
   if (output.status === "running") {
     outputParts.push(
-      "Process is still running. Use output for targeted inspection only; if you are waiting for a marker, update logWatches instead of polling.",
+      "Process is still running. Use output for targeted inspection only; if you are waiting for a marker or completion, update logWatches/alert flags instead of polling or running sleep. If no independent work remains, stop the turn and let notifications bring you back.",
     );
   }
   if (output.stdout.length > 0) {

@@ -23,14 +23,17 @@ const PROCESS_ACTIONS = [
   "clear",
   "write",
   "update",
+  "monitorGroup",
+  "listGroups",
+  "clearGroup",
   ...(DEBUG_PREVIEW_ENABLED ? (["debug_preview"] as const) : []),
 ] as const;
 
 const ProcessesParams = Type.Object({
   action: StringEnum(PROCESS_ACTIONS, {
     description: DEBUG_PREVIEW_ENABLED
-      ? "Action: start (run command), list (show all), output (get recent output), logs (get log file paths), kill (terminate), clear (remove finished), write (write to stdin), update (change mutable metadata/watches), debug_preview (temporary UI preview, no side effects)"
-      : "Action: start (run command), list (show all), output (get recent output), logs (get log file paths), kill (terminate), clear (remove finished), write (write to stdin), update (change mutable metadata/watches)",
+      ? "Action: start (run command), list (show all), output (get recent output), logs (get log file paths), kill (terminate), clear (remove finished), write (write to stdin), update (change mutable metadata/watches), monitorGroup (aggregate non-blocking group notification), listGroups, clearGroup, debug_preview (temporary UI preview, no side effects)"
+      : "Action: start (run command), list (show all), output (get recent output), logs (get log file paths), kill (terminate), clear (remove finished), write (write to stdin), update (change mutable metadata/watches), monitorGroup (aggregate non-blocking group notification), listGroups, clearGroup",
   }),
   command: Type.Optional(
     Type.String({ description: "Command to run (required for start)" }),
@@ -38,13 +41,43 @@ const ProcessesParams = Type.Object({
   name: Type.Optional(
     Type.String({
       description:
-        "Friendly name for the process (required for start; optional new name for update, e.g. 'backend-dev', 'test-runner')",
+        "Friendly name for the process or group (required for start and monitorGroup; optional new process name for update, e.g. 'backend-dev', 'test-runner')",
     }),
   ),
   id: Type.Optional(
     Type.String({
       description:
         "Process ID, returned by start and list actions (required for output/kill/logs/write)",
+    }),
+  ),
+  groupId: Type.Optional(
+    Type.String({
+      description:
+        "Process group monitor ID or name (required for clearGroup unless name is provided)",
+    }),
+  ),
+  processIds: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Process IDs to monitor as a group (required for monitorGroup, max 50 unique IDs)",
+    }),
+  ),
+  groupMode: Type.Optional(
+    StringEnum(["all", "any"] as const, {
+      description:
+        "For monitorGroup: all = notify when all processes exit, optionally fail-fast on first failure; any = notify when any process exits",
+    }),
+  ),
+  failFast: Type.Optional(
+    Type.Boolean({
+      description:
+        "For monitorGroup with groupMode='all': notify on first failed/killed process instead of waiting for all to exit (default true)",
+    }),
+  ),
+  triggerTurn: Type.Optional(
+    Type.Boolean({
+      description:
+        "For monitorGroup: whether the group notification should give the agent a follow-up turn (default true)",
     }),
   ),
   input: Type.Optional(
@@ -227,21 +260,37 @@ export function setupProcessesTools(pi: ExtensionAPI, manager: ProcessManager) {
   - logWatchUpdate.watches: watches for append/replace
   - logWatchUpdate.watchIndexes: indexes for remove
   - logWatchUpdate.replayTailLines: optional bounded one-time scan of recent output for newly added/replaced watches (max 10000 lines; maxReplayMatches max 200)
+- monitorGroup: Register a non-blocking aggregate process monitor over existing process IDs
+  - name and processIds are required
+  - groupMode: all | any (default all)
+  - failFast: for all-mode, notify on first failed/killed process instead of waiting for every process to exit (default true)
+  - triggerTurn: whether the group notification should give the agent a follow-up turn (default true); when true, grouped processes suppress individual lifecycle follow-up turns to avoid duplicates
+- listGroups: Show aggregate process monitors and progress summaries
+- clearGroup: Remove a process group monitor (requires groupId or name)
 ${
   DEBUG_PREVIEW_ENABLED
     ? "- debug_preview: Temporary renderer preview for process tool UIs (no process side effects)\n  - preview: start | list | output | logs | error (default: start)\n"
     : ""
 }
-Important: You DON'T need to poll or wait for processes. Notifications arrive automatically based on your preferences. Start processes and continue with other work - you'll be informed if something requires attention.
+Important: You DON'T need to poll, sleep, or wait for processes. Notifications arrive automatically based on your preferences. Start processes and continue with other work. If no independent work remains, end the turn and let watch/exit notifications bring you back.
 
-Note: User always sees process updates in the UI. The notify flags control whether YOU (the agent) get a turn to react (e.g. check results, fix code, restart).`,
+Never run bash sleep or a wait loop just to give a managed process time. Use alertOnSuccess, alertOnFailure, logWatches, or monitorGroup instead.
+
+For external async systems with provider-native watch commands, run the watch command as a managed process with lifecycle alerts instead of polling from the agent. Example: 'gh run watch <run-id> --exit-status' with alertOnSuccess and alertOnFailure.
+
+For multiple processes, use monitorGroup instead of polling list/output. Use groupMode='all' for Task.WhenAll-style workflows and groupMode='any' for Task.WhenAny-style workflows. With triggerTurn=true, the group owns lifecycle follow-up turns for member processes so the agent gets one aggregate notification.
+
+Note: User always sees process updates in the UI. The notify flags and group monitors control whether YOU (the agent) get a turn to react (e.g. check results, fix code, restart).`,
     promptSnippet:
       "Manage background processes without blocking the conversation",
     promptGuidelines: [
       "Use the process tool for long-running commands such as dev servers, test watchers, build watchers, and log tails instead of bash.",
       "Avoid shell background patterns such as &, nohup, disown, or setsid when the process tool fits.",
-      "After starting a process, continue other work instead of waiting for it.",
-      "After process start with alertOnSuccess, alertOnFailure, or logWatches, do not repeatedly call process output just to wait; do at most one quick sanity check, then continue independent work until a notification/watch event or a concrete next step needs logs.",
+      "After starting a process, continue other work instead of waiting for it; if no independent work remains, stop the turn and rely on watch/exit notifications.",
+      "Never run bash sleep, timeout-wrapped sleep, or a shell wait loop just to give a managed process time.",
+      "For external async systems that provide a watch command, run that command under process with lifecycle alerts instead of polling, e.g. gh run watch <run-id> --exit-status.",
+      "For multiple related processes, register a monitorGroup instead of polling list/output; use groupMode:'all' for WhenAll-style completion and groupMode:'any' for WhenAny-style completion.",
+      "After process start with alertOnSuccess, alertOnFailure, or logWatches, do not repeatedly call process output just to wait; do at most one quick sanity check, then continue independent work or stop until a notification/watch event or concrete next step needs logs.",
       "If a running process has missing, wrong, or noisy logWatches, use process action:'update' to append, replace, remove, or clear watches instead of polling output or restarting the process.",
       "If you add or replace watches after relevant output may have already appeared, use a small replayTailLines value instead of repeatedly polling process output.",
       "Use process output for targeted inspection after a watch/alert, after the user asks for status, or when a concrete next step depends on current logs.",
