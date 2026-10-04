@@ -21,12 +21,6 @@ importers:
       '@aliou/sh':
         specifier: ^0.1.0
         version: 0.1.0
-      '@mariozechner/pi-tui':
-        specifier: 0.69.0
-        version: 0.69.0
-      typebox:
-        specifier: ^1.0.0
-        version: 1.1.31
     devDependencies:
       '@aliou/biome-plugins':
         specifier: ^0.3.2
@@ -43,12 +37,18 @@ importers:
       '@mariozechner/pi-coding-agent':
         specifier: 0.69.0
         version: 0.69.0(ws@8.19.0)(zod@3.25.76)
+      '@mariozechner/pi-tui':
+        specifier: 0.69.0
+        version: 0.69.0
       '@types/node':
         specifier: ^25.0.10
         version: 25.2.3
       husky:
         specifier: ^9.1.7
         version: 9.1.7
+      typebox:
+        specifier: ^1.0.0
+        version: 1.1.31
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -607,20 +607,24 @@ packages:
   '@mariozechner/pi-agent-core@0.69.0':
     resolution: {integrity: sha512-dYZjee7QEIwVVbDGCGriiLjDT34IdMlXMjMp4drVKcLEuVc+BztyODwu3w4ZORVvwaySGGlF9UALjJKUVoXiug==}
     engines: {node: '>=20.0.0'}
+    deprecated: please use @earendil-works/pi-agent-core instead going forward
 
   '@mariozechner/pi-ai@0.69.0':
     resolution: {integrity: sha512-bl838sr57zx/apkiTeNPFQgbBkGXN4HHhm2oghzSRohJIBrR+H001bTeco7Osuke+EZTxO3V5Aev2qlZdUa2xw==}
     engines: {node: '>=20.0.0'}
+    deprecated: please use @earendil-works/pi-ai instead going forward
     hasBin: true
 
   '@mariozechner/pi-coding-agent@0.69.0':
     resolution: {integrity: sha512-/EFn43RO2TtMgZI4fMXNepIvbWm2GqhhaLIHBkrO7tRbRCzgvDYkw9sMLKhdf1Ihom2CjC3T/fzQRIPasRSIrQ==}
     engines: {node: '>=20.6.0'}
+    deprecated: please use @earendil-works/pi-coding-agent instead going forward
     hasBin: true
 
   '@mariozechner/pi-tui@0.69.0':
     resolution: {integrity: sha512-/82SOMzCA1srivwfcSO8r9XLdAgJNcgpWzNZY33IqqvGev8Q4iWY/hA1wAkLB0l7PKJJ4Dh57xS4IGHbyVM7lA==}
     engines: {node: '>=20.0.0'}
+    deprecated: please use @earendil-works/pi-tui instead going forward
 
   '@mistralai/mistralai@2.2.1':
     resolution: {integrity: sha512-uKU8CZmL2RzYKmplsU01hii4p3pe4HqJefpWNRWXm1Tcm0Sm4xXfwSLIy4k7ZCPlbETCGcp69E7hZs+WOJ5itQ==}
