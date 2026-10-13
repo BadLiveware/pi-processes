@@ -1,4 +1,4 @@
-![banner](https://assets.aliou.me/pi-extensions/banners/pi-processes.png)
+![banner](https://assets.aliou.me/github/aliou/pi-processes/banner-v0.10.x.png)
 
 # pi-processes
 
@@ -10,6 +10,8 @@ This extension lets Pi keep long-running commands alive while the conversation c
 
 When a task needs a long-running command, Pi can start it in the background by itself and keep helping with the rest of the work.
 
+[![Pi starts a long-running process and keeps working](https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/agent-starts-processes.gif)](https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/agent-starts-processes.mp4)
+
 That means Pi can, for example:
 
 - start a dev server and keep coding
@@ -17,9 +19,7 @@ That means Pi can, for example:
 - run a local API while it inspects logs
 - watch build output without blocking the conversation
 
-You can then inspect, pin, or stop those processes from the UI.
-
-<!-- VIDEO: {"id":"agent-starts-processes","title":"Pi starts a long-running process and keeps working"} -->
+You can then inspect, pin, stop, or clear those processes from the UI.
 
 ## Installation
 
@@ -35,66 +35,67 @@ From git:
 pi install git:github.com/aliou/pi-processes
 ```
 
+## How Pi stays in the loop
+
+Pi does not wait around for a background process. After it starts one, it keeps helping with the rest of the work and gets brought back automatically when something happens:
+
+- a readiness marker appears in the logs (a server prints "ready")
+- an error appears in the logs (a build prints a type error)
+- the process exits, whether it succeeded, failed, or was killed
+
+That is how Pi can start a dev server and then keep coding, or run a test watcher and react when a test fails, without sleeping or polling. If a watch fires too often, Pi can quiet it without restarting the process.
+
 ## Open the process panel
 
-Use `/ps` to open the main process panel.
+Use `/ps` to open the main process panel. It shows running and finished processes, with the most recent output preview. The preview opens on the newest page so you can see live activity without scrolling.
 
 From there you can:
 
 - see running and finished processes
-- see active watch and alert indicators on monitored processes
 - inspect recent output
 - pin a process to the dock
 - kill a running process
 - clear finished entries
 
-Keys:
-
-- `j/k` or arrow keys: move selection
-- `J/K`: scroll preview
-- `enter`: pin selected process to the dock
-- `x`: kill selected process
-- `c`: clear finished processes
-- `q` or `esc`: close
-
-<!-- VIDEO: {"id":"process-panel","title":"Browse and manage processes from the panel"} -->
-
 ## Inspect logs
 
-Use `/ps:logs [id|name]` to open the log overlay for one process.
+Use `/ps:logs [id]` to open the log overlay for one process. The viewer is cached per process, so switching tabs preserves scroll position and follow mode.
 
 This is useful when Pi started a server, watcher, or local API and you want to follow what it is doing in more detail.
 
-Keys:
+## Control the dock
 
-- `tab` / `shift+tab`: switch process tabs
-- `g/G`: jump to top or bottom
-- `j/k` or arrow keys: scroll
-- `s`: switch between combined, stdout, and stderr
-- `f`: toggle follow mode
-- `/`: search
-- `n/N`: move between search matches
-- `q` or `esc`: close
+Use `/ps:dock [expand|collapse|close]` to control dock visibility.
 
-<!-- VIDEO: {"id":"inspect-logs","title":"Open the log overlay and inspect output"} -->
+The dock gives you a compact live view without leaving the conversation.
 
 ## Pin one process
 
-Use `/ps:pin [id|name]` to keep the dock focused on one process.
+Use `/ps:pin [id]` to keep the dock focused on one process.
 
 This is useful when one process matters more than the others, such as a dev server or a test watcher.
 
 Without arguments, Pi shows a picker.
 
-<!-- VIDEO: {"id":"pin-process","title":"Pin the dock to one process"} -->
+## Stop and clear processes
 
-## Control the dock
+Use `/ps:kill [id]` to stop a running process, and `/ps:clear` to remove finished entries from the panel and free their log storage.
 
-Use `/ps:dock [show|hide|toggle]` to control dock visibility.
+`/ps:kill` waits for the process to actually exit (or time out), so the result it reports reflects what happened. Without arguments, Pi shows a picker.
 
-The dock gives you a compact live view without leaving the conversation.
+`/ps:clear` never touches live processes.
 
-<!-- VIDEO: {"id":"dock-control","title":"Show, hide, and use the dock"} -->
+## Keep a status line in view
+
+Enable the status widget in `/ps:settings` to show a compact line of running processes below the editor. Each process shows a status dot, its name, and its state, with `+N more` overflow when the line does not fit.
+
+It is disabled by default. The widget reflows on resize and clears itself when the process list is empty.
+
+## Send input to a process
+
+Use the `process` tool with `action: "write"` to send bytes to a running process's stdin. This is how you drive interactive servers, REPLs, and CLIs that expect input after they start.
+
+Pass `input` for the bytes to write, and set `end: true` to close stdin (for example to signal EOF to a waiting process).
 
 ## Adjust settings
 
@@ -107,9 +108,8 @@ Available settings include:
 - shell path override
 - dock defaults
 - follow mode behavior
+- status widget toggle
 - optional background command interception
-
-<!-- VIDEO: {"id":"settings","title":"Adjust process extension settings"} -->
 
 ## Platform support
 
@@ -117,73 +117,63 @@ Available settings include:
 - Linux: supported
 - Windows: not supported
 
-## Runtime log watch alerts
+## Similar but different
 
-Use `process` tool `start` with `logWatches` to trigger immediate alerts while the process is still running.
+Pi has several process, terminal, and background-task extensions. pi-processes focuses on explicit LLM-managed background processes, log inspection, watches that can wake the agent, and Pi UI surfaces for `/ps`, logs, dock, and status.
 
-- default behavior: each watch fires once (`repeat: false`)
-- set `repeat: true` to trigger on every match
-- scope by stream (`stdout`, `stderr`, `both`) to reduce noise
+See [pi.dev/packages](https://pi.dev/packages) for the full registry of Pi extensions.
 
-Example: server ready marker (one-time default)
+### Background command managers
 
-```json
-{
-  "action": "start",
-  "name": "dev-server",
-  "command": "pnpm dev",
-  "logWatches": [
-    { "pattern": "ready on http://localhost:3000" }
-  ]
-}
-```
+These packages are closest when you want shell commands, dev servers, watchers, or logs to keep running while Pi continues the conversation.
 
-Example: error marker from stderr
+- [pi-background-tasks](https://pi.dev/packages/pi-background-tasks): durable background shell tasks plus delegated child Pi workflows.
+- [@99percentpeople/pi-background-tasks](https://pi.dev/packages/%4099percentpeople/pi-background-tasks): background commands and attachable PTY/TUI sessions, with SSH Remote integration.
+- [@richardgill/pi-background-bash](https://github.com/richardgill/pi-extensions/tree/main/extensions/background-bash): replaces `bash` with session-owned local process groups and adds `bash_process` for list, peek, and kill.
+- [pi-bash-bg](https://pi.dev/packages/pi-bash-bg): minimal `&` support for Pi's bash tool, detaching background processes and keeping output out of the context window.
+- [pi-tian-background-terminals](https://pi.dev/packages/pi-tian-background-terminals): replaces Pi's built-in Bash with automatic background yielding, completion notifications, and a `/ps` viewer.
+- [pi-better-background-tasks](https://pi.dev/packages/pi-better-background-tasks): durable background shell tasks, watchers, logs, and status inspection.
+- [pi-patty-bg-tasks](https://pi.dev/packages/pi-patty-bg-tasks): Claude Code-style background tasks with auto-backgrounding, attach, file-backed output, and cooperative steering.
+- [@mjakl/pi-processes](https://pi.dev/packages/%40mjakl/pi-processes): stripped-down pi-processes fork with the `process` tool, a single `/ps` overlay, a compact status line, and fewer commands/settings.
+- [@haemmid/pi-processes](https://pi.dev/packages/%40haemmid/pi-processes): pi-web-focused pi-processes fork for dev-server automation, with `ensure`, `restart`, and `wait` actions for Astro/Vite-style workflows.
+- [pi-processes-git-bash](https://pi.dev/packages/pi-processes-git-bash): pi-processes fork for Windows users through Git Bash.
 
-```json
-{
-  "action": "start",
-  "name": "builder",
-  "command": "pnpm build --watch",
-  "logWatches": [
-    { "pattern": "TypeError|ReferenceError", "stream": "stderr" }
-  ]
-}
-```
+### Terminal and shell replacements
 
-Example: repeatable watch on stdout only
+These packages are a better fit when you want a different shell substrate, PTY behavior, or platform-specific terminal support.
 
-```json
-{
-  "action": "start",
-  "name": "worker",
-  "command": "pnpm worker",
-  "logWatches": [
-    { "pattern": "job completed", "stream": "stdout", "repeat": true }
-  ]
-}
-```
+- [pi-unified-exec](https://pi.dev/packages/pi-unified-exec): Codex-style long-lived shell sessions with stdin, PTY, REPL, SSH, dev-server, and disk-log support.
+- [pi-live-terminal](https://pi.dev/packages/pi-live-terminal): tmux-backed command runner with a live terminal widget.
+- [@aliaksei-raketski/pi-tmux-bash](https://pi.dev/packages/%40aliaksei-raketski/pi-tmux-bash): runs model-facing shell commands in managed tmux windows.
+- [@4fu/pi-pwsh](https://pi.dev/packages/%404fu/pi-pwsh): persistent PowerShell tasks for Pi on Windows, with ConPTY sessions and user requests.
+- [pi-pwsh-notify](https://pi.dev/packages/pi-pwsh-notify): PowerShell shell with background jobs and completion/server-ready notifications.
 
-Invalid regex patterns fail fast at process start with a clear error.
+### Monitors, schedulers, and visibility
 
-If Pi starts a long-running process with missing, noisy, or incorrect watches, it can update the process metadata later without restarting the process. The `process` tool `update` action can change alert flags and list, append, replace, remove, or clear log watches. When adding or replacing watches after output may have already passed the relevant marker, Pi can use `replayTailLines` to scan a small tail of recent output once. Replay is intentionally bounded: `replayTailLines` must be at most `10000`, and `maxReplayMatches` must be at most `200`.
+These packages are more about watching, waking, or surfacing process state than replacing pi-processes directly.
 
-Example: replace noisy watches and replay recent output
+- [pi-event-monitor](https://pi.dev/packages/pi-event-monitor): event-driven shell-stream and file watchers that wake the session on process exit, matching output, or file writes.
+- [pi-monitor-plugin](https://pi.dev/packages/pi-monitor-plugin): background jobs, monitors, loops, schedules, and idle-aware notifications.
+- [pi-tripwire](https://pi.dev/packages/pi-tripwire): footer visibility for agent-spawned localhost servers; not a process runner itself.
+- [@cortexkit/aft-pi](https://pi.dev/packages/%40cortexkit/aft-pi): broader Agent File Tools package that includes background bash tasks, PTY sessions, and output compression alongside code-analysis tools.
 
-```json
-{
-  "action": "update",
-  "id": "proc_1",
-  "alertOnSuccess": true,
-  "logWatchUpdate": {
-    "mode": "replace",
-    "watches": [
-      { "pattern": "Ready|ERROR|FAIL", "stream": "both", "repeat": true }
-    ],
-    "replayTailLines": 100
-  }
-}
-```
+## Examples
+
+[`examples/`](./examples) has extension snippets you can copy to `~/.pi/agent/extensions/` and adapt:
+
+- [`bash-background.ts`](./examples/bash-background.ts): overrides the bash tool so a running command can move to pi-processes with a shortcut, a timeout, or after an idle period.
+- [`bash-to-process.ts`](./examples/bash-to-process.ts): intercepts bash calls that use `&`, `nohup`, `setsid`, or `disown`, and starts them as managed processes instead of blocking them outright.
+- [`bash-notify-background.ts`](./examples/bash-notify-background.ts): overrides the bash tool so a command that hits its timeout is handed to pi-processes and keeps running in the background instead of being killed.
+
+## Monitor several jobs together
+
+Pi can monitor several processes as one group and react once when all jobs finish, when the first job finishes, or when a job fails.
+This avoids duplicate completion turns while other jobs keep running.
+Pi can also repair log watches and inspect recent matching output without restarting a process.
+
+The panel and dock use the upstream layout; legacy watch and alert badges are not shown.
+Pi can inspect notification settings and watch state through the process tool.
+See the shipped [process skill](./skills/pi-processes/SKILL.md) for tool guidance and [notification documentation](./docs/notifications.md) for API details.
 
 ## Troubleshooting
 
@@ -198,6 +188,24 @@ Use `/ps:pin` to focus the dock on that process.
 ### I want Pi to avoid shell background tricks
 
 Enable background command interception in `/ps:settings`. When enabled, Pi avoids normal shell background patterns and uses the process workflow instead.
+
+## Feature demos
+
+**Watch a file-backed log and recover from an error**
+
+[![Watch a file-backed log and recover from an error](https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/debug-from-log.gif)](https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/debug-from-log.mp4)
+
+**Open the log overlay and inspect output**
+
+[![Open the log overlay and inspect output](https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/inspect-logs.gif)](https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/inspect-logs.mp4)
+
+**Stop and clear processes**
+
+[![Stop and clear processes](https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/stop-and-clear.gif)](https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/stop-and-clear.mp4)
+
+**Send input to a running process**
+
+[![Send input to a running process](https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/send-input.gif)](https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/send-input.mp4)
 
 ## Contributing
 

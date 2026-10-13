@@ -1,36 +1,45 @@
 /**
- * Strip ANSI escape codes from a string.
+ * Strip ANSI escape codes and other terminal control characters from a string.
  *
  * Removes:
  * - All CSI sequences (\x1b[...X) - SGR, cursor movement, erase, scroll, etc.
- * - OSC 8 hyperlinks (\x1b]8;;URL\x07)
+ * - OSC sequences (\x1b]...\x07 or \x1b]...\x1b\\)
  * - APC sequences (\x1b_...\x07 or \x1b_...\x1b\\)
+ * - Remaining C0 control chars except tab/newline
  */
-/**
- * Check if a string contains ANSI escape codes.
- */
+const ESC = String.fromCodePoint(0x001b);
+const BEL = String.fromCodePoint(0x0007);
+
+const ANSI_REPLACEMENTS: RegExp[] = [
+  // CSI sequences: SGR, cursor movement, erase, scroll, etc.
+  new RegExp(`${ESC}\\[[\\x30-\\x3f]*[\\x20-\\x2f]*[\\x40-\\x7e]`, "gu"),
+  // OSC sequences: ESC]...<BEL> or ESC]...<ESC>\\.
+  new RegExp(`${ESC}\\][^${BEL}${ESC}]*(?:${BEL}|${ESC}\\\\)`, "gu"),
+  // APC sequences: ESC_...<BEL> or ESC_...<ESC>\\.
+  new RegExp(`${ESC}_[^${BEL}${ESC}]*(?:${BEL}|${ESC}\\\\)`, "gu"),
+];
+
+// Strip C0 terminal control characters that can corrupt TUI layout when
+// rendered back into pi, such as carriage return and backspace. Keep tabs and
+// newlines because logs use them as printable whitespace/line breaks.
+// C1 controls are stripped too: a raw \u009b is an alias for CSI on some
+// terminals, so leaving it in would reopen the escape-sequence hole.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: this regex intentionally targets terminal control characters.
+const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu;
+
+/** Check if a string contains ANSI escape codes. */
 export function hasAnsi(str: string): boolean {
-  return str.includes(String.fromCodePoint(0x001b));
+  return str.includes(ESC);
 }
 
 export function stripAnsi(str: string): string {
-  // ESC = \u001b, BEL = \u0007
-  const ESC = String.fromCodePoint(0x001b);
-  const BEL = String.fromCodePoint(0x0007);
+  let clean = str;
 
-  if (!str.includes(ESC)) {
-    return str;
+  if (str.includes(ESC)) {
+    for (const pattern of ANSI_REPLACEMENTS) {
+      clean = clean.replace(pattern, "");
+    }
   }
 
-  // Strip all CSI sequences (ESC[...X where X is any letter)
-  let clean = str.replace(new RegExp(`${ESC}\\[[0-9;]*[A-Za-z]`, "gu"), "");
-  // Strip OSC 8 hyperlinks: ESC]8;;URL<BEL> and ESC]8;;<BEL>
-  clean = clean.replace(new RegExp(`${ESC}\\]8;;[^${BEL}]*${BEL}`, "gu"), "");
-  // Strip APC sequences: ESC_...<BEL> or ESC_...<ESC>\\ (used for cursor marker)
-  clean = clean.replace(
-    new RegExp(`${ESC}_[^${BEL}${ESC}]*(?:${BEL}|${ESC}\\\\)`, "gu"),
-    "",
-  );
-
-  return clean;
+  return clean.replace(TERMINAL_CONTROL_CHARS, "");
 }

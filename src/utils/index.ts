@@ -1,10 +1,9 @@
 export { hasAnsi, stripAnsi } from "./ansi";
-export {
-  formatMonitorSummary,
-  formatRuntime,
-  formatStatus,
-  formatStatusTag,
-  formatTimestamp,
-  truncateCmd,
-} from "./format";
+export { clampToTail, trimIncompleteUtf8Suffix } from "./buffer";
+export { resolveShellExecutable, spawnCommand } from "./command-executor";
+export { formatRuntime, formatStatus, formatTimestamp } from "./format";
+export type { LineMatchMode } from "./match-line";
+export { compileLineMatcher } from "./match-line";
 export { isProcessGroupAlive, killProcessGroup } from "./process-group";
+export { walkCommands, wordToString } from "./shell-utils";
+export { shortenPath } from "./shorten-path";

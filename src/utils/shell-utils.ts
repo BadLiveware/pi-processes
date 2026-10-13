@@ -1,7 +1,9 @@
 // Shell AST helpers. Duplicated from pi-toolchain since cross-extension imports are not allowed.
 
 import type {
+  ArithExpr,
   Command,
+  ParamExp,
   Program,
   SimpleCommand,
   Statement,
@@ -28,16 +30,75 @@ function partToString(part: WordPart): string {
     case "DblQuoted":
       return part.parts.map(partToString).join("");
     case "ParamExp":
-      return part.short
-        ? `$${part.param.value}`
-        : `\${${part.param.value}${part.op ?? ""}${part.value ? wordToString(part.value) : ""}}`;
+      return paramExpToString(part);
     case "CmdSubst":
       return "$(...)";
     case "ArithExp":
-      return `$((${part.expr}))`;
+      return `$((${arithmeticToString(part.x)}))`;
     case "ProcSubst":
       return `${part.op}(...)`;
+    case "BraceExp": {
+      let separator = ",";
+      if (part.sequence) separator = "..";
+      return `{${part.elems.map(wordToString).join(separator)}}`;
+    }
+    case "ExtGlob":
+      return `${part.op}${part.pattern})`;
   }
+}
+
+function arithmeticToString(expression: ArithExpr): string {
+  switch (expression.type) {
+    case "ArithLit":
+      return expression.value;
+    case "ParamExp":
+      return partToString(expression);
+    case "BinaryArithm":
+      return `${arithmeticToString(expression.x)} ${expression.op} ${arithmeticToString(expression.y)}`;
+    case "UnaryArithm":
+      if (expression.post)
+        return `${arithmeticToString(expression.x)}${expression.op}`;
+      return `${expression.op}${arithmeticToString(expression.x)}`;
+    case "ParenArithm":
+      return `(${arithmeticToString(expression.x)})`;
+  }
+}
+
+/**
+ * Render a raw text representation of a ParamExp node (e.g. `$VAR`,
+ * `${VAR:-default}`, `${#ARR[@]}`). Close to surface syntax, intended
+ * for display and command-name detection rather than exact round-trips.
+ */
+function paramExpToString(part: ParamExp): string {
+  const name = part.param.value;
+  if (part.short) return `$${name}`;
+
+  const prefix = part.excl ? "!" : part.length ? "#" : "";
+  const index = part.index ? `[${wordToString(part.index)}]` : "";
+
+  let suffix = "";
+  if (part.slice) {
+    const length = part.slice.length
+      ? `:${wordToString(part.slice.length)}`
+      : "";
+    suffix = `:${wordToString(part.slice.offset)}${length}`;
+  } else if (part.replace) {
+    const delimiter = part.replace.all
+      ? "//"
+      : part.replace.prefix
+        ? "/#"
+        : part.replace.suffix
+          ? "/%"
+          : "/";
+    const replacement = part.replace.with
+      ? `/${wordToString(part.replace.with)}`
+      : "";
+    suffix = `${delimiter}${wordToString(part.replace.orig)}${replacement}`;
+  } else if (part.exp) {
+    suffix = `${part.exp.op}${part.exp.word ? wordToString(part.exp.word) : ""}`;
+  }
+
+  return `\${${prefix}${name}${index}${suffix}}`;
 }
 
 /**

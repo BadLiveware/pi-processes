@@ -2,6 +2,12 @@
 "@aliou/pi-processes": minor
 ---
 
-Add agent-facing process metadata updates. The `process` tool can now update mutable metadata for existing processes, including name, alert flags, and log watches. Agents can list, append, replace, remove, or clear watches, and optionally replay a bounded tail of recent output for newly added watches so they can repair missed or noisy watches without polling output or restarting long-running work.
+Retain process metadata updates, legacy alert and regex watch inputs, stable watch identifiers, and bounded watch replay alongside notify settings and structured output.
+Expose retained notification policy and fired watch state in list and update results.
+Keep kill as an alias for stop and logs as a log-path lookup.
 
-Show active watch and alert indicators in both the process cards/list output and the persistent log dock above the prompt, so monitored long-running commands remain visibly monitored while agents continue working.
+Add aggregate process monitors over existing process IDs, including all/any conditions, fail-fast notifications, clearing, and protection of pending completion evidence.
+Group-owned follow-up turns suppress duplicate member lifecycle turns without suppressing log watches.
+
+Use the modular process runtime and upstream panel, dock and log viewer presentation.
+Validate with Pi 1.2.0 while keeping host-provided dependencies as wildcard peers.

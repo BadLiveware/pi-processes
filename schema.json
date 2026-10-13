@@ -1,0 +1,142 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$ref": "#/definitions/ProcessConfig",
+  "definitions": {
+    "ProcessConfig": {
+      "type": "object",
+      "properties": {
+        "execution": {
+          "$ref": "#/definitions/ExecutionConfig",
+          "description": "Process execution settings."
+        },
+        "interception": {
+          "$ref": "#/definitions/InterceptionConfig",
+          "description": "Shell-command interception settings."
+        },
+        "processList": {
+          "$ref": "#/definitions/ProcessListConfig",
+          "description": "Process overview and log viewport settings."
+        },
+        "output": {
+          "$ref": "#/definitions/OutputConfig",
+          "description": "Process output retention settings."
+        },
+        "follow": {
+          "$ref": "#/definitions/FollowConfig",
+          "description": "Live log follow behavior."
+        },
+        "widget": {
+          "$ref": "#/definitions/WidgetConfig",
+          "description": "Dock and status widget settings."
+        },
+        "$schema": {
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\d{1,15}(\\.\\d{1,15})?(\\.\\d{1,15})?$"
+            }
+          ],
+          "description": "Config schema version, stamped by migrations. Current version: 0.10.6."
+        }
+      },
+      "additionalProperties": false,
+      "description": "User-facing pi-processes settings stored on disk.\n\nThe reserved `$schema` and `version` keys are owned by the config loader and injected into schema.json by `pi-settings-schema`."
+    },
+    "ExecutionConfig": {
+      "type": "object",
+      "properties": {
+        "shellPath": {
+          "type": "string",
+          "description": "Absolute shell executable used to run process commands."
+        }
+      },
+      "additionalProperties": false
+    },
+    "InterceptionConfig": {
+      "type": "object",
+      "properties": {
+        "blockBackgroundCommands": {
+          "type": "boolean",
+          "description": "Block shell background patterns and redirect the agent to the process tool."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProcessListConfig": {
+      "type": "object",
+      "properties": {
+        "maxPreviewLines": {
+          "type": "number",
+          "description": "Maximum log rows displayed in the overview preview and logs overlay."
+        },
+        "maxVisibleProcesses": {
+          "type": "number",
+          "description": "Maximum process rows displayed in the overview before scrolling."
+        }
+      },
+      "additionalProperties": false
+    },
+    "OutputConfig": {
+      "type": "object",
+      "properties": {
+        "defaultTailLines": {
+          "type": "number",
+          "description": "Default number of recent lines returned by the process output action."
+        },
+        "maxOutputLines": {
+          "type": "number",
+          "description": "Maximum lines retained by process log interfaces."
+        },
+        "maxOutputBytes": {
+          "type": "number",
+          "description": "Maximum bytes retained by each process log interface."
+        }
+      },
+      "additionalProperties": false
+    },
+    "FollowConfig": {
+      "type": "object",
+      "properties": {
+        "enabledByDefault": {
+          "type": "boolean",
+          "description": "Open process log interfaces in follow mode by default."
+        },
+        "autoHideOnFinish": {
+          "type": "boolean",
+          "description": "Hide process log interfaces when all managed processes finish."
+        }
+      },
+      "additionalProperties": false
+    },
+    "WidgetConfig": {
+      "type": "object",
+      "properties": {
+        "showStatusWidget": {
+          "type": "boolean",
+          "description": "Show a one-line process summary below the editor."
+        },
+        "dockDefaultState": {
+          "type": "string",
+          "enum": [
+            "closed",
+            "collapsed",
+            "expanded"
+          ],
+          "description": "Initial visibility of the process dock."
+        },
+        "dockHeight": {
+          "type": "number",
+          "description": "Number of log rows displayed in the expanded process dock."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
