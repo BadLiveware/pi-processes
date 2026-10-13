@@ -1,6 +1,6 @@
 {
   "name": "@aliou/pi-processes",
-  "version": "0.8.1",
+  "version": "0.13.2",
   "license": "MIT",
   "type": "module",
   "private": false,
@@ -16,19 +16,29 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./extensions/processes/index.ts",
+      "./extensions/processes-logs/index.ts",
+      "./extensions/processes-dock/index.ts"
     ],
     "skills": [
       "./skills/pi-processes"
     ],
-    "video": "https://assets.aliou.me/pi-extensions/demos/pi-processes.mp4"
+    "image": "https://assets.aliou.me/github/aliou/pi-processes/banner-v0.10.x.png",
+    "video": "https://assets.aliou.me/pi-extensions/demos/processes/v0.10.0/agent-starts-processes.mp4"
   },
   "publishConfig": {
     "access": "public"
   },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "files": [
     "src",
+    "!src/**/*.test.ts",
+    "extensions",
+    "!extensions/**/*.test.ts",
     "skills",
+    "schema.json",
     "README.md",
     "CONTRIBUTING.md"
   ],
@@ -47,28 +57,38 @@
     "@aliou/biome-plugins": "^0.14.0",
     "@biomejs/biome": "2.5.15",
     "@changesets/cli": "^3.0.3",
-    "@earendil-works/pi-ai": "1.0.2",
-    "@earendil-works/pi-coding-agent": "1.0.2",
-    "@earendil-works/pi-tui": "1.0.2",
+    "@earendil-works/pi-ai": "1.2.0",
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0",
+    "@golevelup/ts-vitest": "^4.0.0",
     "@types/node": "^25.9.9",
     "husky": "^9.1.7",
+    "memfs": "^4.57.2",
+    "ts-json-schema-generator": "^2.9.0",
     "typebox": "1.3.27",
     "typescript": "7.0.2",
     "vite": "8.3.2",
-    "vitest": "5.0.3"
+    "vitest": "5.0.3",
+    "vitest-evals": "0.15.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "typecheck:evals": "tsc --noEmit -p tests/evals/tsconfig.json",
     "lint": "biome check",
     "format": "biome check --write",
+    "gen:schema": "pi-settings-schema -p extensions/processes/config/types.ts -t ProcessConfig -o schema.json --version 0.10.6",
+    "check:schema": "pi-settings-schema -p extensions/processes/config/types.ts -t ProcessConfig -o schema.json --version 0.10.6 --check",
+    "check:changesets": "node scripts/check-changesets.ts",
     "check:lockfile": "pnpm install --frozen-lockfile --ignore-scripts",
     "prepare": "[ -d .git ] && husky || true",
     "changeset": "changeset",
     "version": "changeset version",
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:evals": "vitest run --config tests/evals/vitest.config.ts",
     "release": "pnpm changeset publish"
   },
-  "packageManager": "pnpm@10.26.1",
+  "packageManager": "pnpm@11.5.1",
   "peerDependenciesMeta": {
     "@earendil-works/pi-ai": {
       "optional": true

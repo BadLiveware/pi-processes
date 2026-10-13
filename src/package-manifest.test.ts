@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
+import { test, vi } from "vitest";
+
+vi.unmock("node:fs");
 
 test("host-provided modules are wildcard peers, not runtime dependencies", () => {
   const manifest = JSON.parse(
@@ -38,13 +40,6 @@ test("host-provided modules are wildcard peers, not runtime dependencies", () =>
       `${name} is needed for local tests`,
     );
   }
-  assert.equal(manifest.devDependencies["@earendil-works/pi-ai"], "1.0.2");
-  assert.equal(
-    manifest.devDependencies["@earendil-works/pi-coding-agent"],
-    "1.0.2",
-  );
-  assert.equal(manifest.devDependencies["@earendil-works/pi-tui"], "1.0.2");
-  assert.equal(manifest.devDependencies.typebox, "1.3.27");
   for (const name of [
     "@mariozechner/pi-ai",
     "@mariozechner/pi-coding-agent",

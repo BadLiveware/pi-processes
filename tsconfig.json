@@ -10,6 +10,14 @@
     "resolveJsonModule": true,
     "noEmit": true
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules"]
+  "include": [
+    "src/**/*",
+    "extensions/**/*",
+    "examples/**/*",
+    "scripts/**/*",
+    "tests/**/*"
+  ],
+  // tests/evals has its own tsconfig: it depends on the gitignored vendored
+  // pi-evals harness, so `pnpm typecheck` must stay green without a sync.
+  "exclude": ["node_modules", "tests/evals"]
 }

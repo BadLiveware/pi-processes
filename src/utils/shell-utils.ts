@@ -3,6 +3,7 @@
 import type {
   ArithExpr,
   Command,
+  ParamExp,
   Program,
   SimpleCommand,
   Statement,
@@ -28,28 +29,19 @@ function partToString(part: WordPart): string {
       return part.value;
     case "DblQuoted":
       return part.parts.map(partToString).join("");
-    case "ParamExp": {
-      const parameter = `${part.length ? "#" : ""}${part.excl ? "!" : ""}${part.param.value}${part.index ? `[${wordToString(part.index)}]` : ""}`;
-      if (part.short) return `$${parameter}`;
-      const expansion = part.exp
-        ? `${part.exp.op}${part.exp.word ? wordToString(part.exp.word) : ""}`
-        : "";
-      const slice = part.slice
-        ? `:${wordToString(part.slice.offset)}${part.slice.length ? `:${wordToString(part.slice.length)}` : ""}`
-        : "";
-      const replacement = part.replace
-        ? `${part.replace.all ? "//" : "/"}${part.replace.prefix ? "#" : part.replace.suffix ? "%" : ""}${wordToString(part.replace.orig)}/${part.replace.with ? wordToString(part.replace.with) : ""}`
-        : "";
-      return `\${${parameter}${slice}${expansion}${replacement}}`;
-    }
+    case "ParamExp":
+      return paramExpToString(part);
     case "CmdSubst":
       return "$(...)";
     case "ArithExp":
       return `$((${arithmeticToString(part.x)}))`;
     case "ProcSubst":
       return `${part.op}(...)`;
-    case "BraceExp":
-      return `{${part.elems.map(wordToString).join(part.sequence ? ".." : ",")}}`;
+    case "BraceExp": {
+      let separator = ",";
+      if (part.sequence) separator = "..";
+      return `{${part.elems.map(wordToString).join(separator)}}`;
+    }
     case "ExtGlob":
       return `${part.op}${part.pattern})`;
   }
@@ -64,13 +56,49 @@ function arithmeticToString(expression: ArithExpr): string {
     case "BinaryArithm":
       return `${arithmeticToString(expression.x)} ${expression.op} ${arithmeticToString(expression.y)}`;
     case "UnaryArithm":
-      if (expression.post) {
+      if (expression.post)
         return `${arithmeticToString(expression.x)}${expression.op}`;
-      }
       return `${expression.op}${arithmeticToString(expression.x)}`;
     case "ParenArithm":
       return `(${arithmeticToString(expression.x)})`;
   }
+}
+
+/**
+ * Render a raw text representation of a ParamExp node (e.g. `$VAR`,
+ * `${VAR:-default}`, `${#ARR[@]}`). Close to surface syntax, intended
+ * for display and command-name detection rather than exact round-trips.
+ */
+function paramExpToString(part: ParamExp): string {
+  const name = part.param.value;
+  if (part.short) return `$${name}`;
+
+  const prefix = part.excl ? "!" : part.length ? "#" : "";
+  const index = part.index ? `[${wordToString(part.index)}]` : "";
+
+  let suffix = "";
+  if (part.slice) {
+    const length = part.slice.length
+      ? `:${wordToString(part.slice.length)}`
+      : "";
+    suffix = `:${wordToString(part.slice.offset)}${length}`;
+  } else if (part.replace) {
+    const delimiter = part.replace.all
+      ? "//"
+      : part.replace.prefix
+        ? "/#"
+        : part.replace.suffix
+          ? "/%"
+          : "/";
+    const replacement = part.replace.with
+      ? `/${wordToString(part.replace.with)}`
+      : "";
+    suffix = `${delimiter}${wordToString(part.replace.orig)}${replacement}`;
+  } else if (part.exp) {
+    suffix = `${part.exp.op}${part.exp.word ? wordToString(part.exp.word) : ""}`;
+  }
+
+  return `\${${prefix}${name}${index}${suffix}}`;
 }
 
 /**

@@ -1,0 +1,231 @@
+import { createEventBus } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it, vi } from "vitest";
+import type { ProcessProtocolNotificationPayload } from "../../shared/protocol";
+import { CHANNELS } from "../../shared/protocol";
+import { MESSAGE_TYPE_PROCESS_NOTIFICATION } from "../constants";
+import { registerNotificationDelivery } from "./notifications";
+
+function makePayload(
+  overrides: Partial<ProcessProtocolNotificationPayload> = {},
+): ProcessProtocolNotificationPayload {
+  return {
+    kind: "failure",
+    processId: "proc_1",
+    processName: "dev",
+    command: "pnpm dev",
+    timestamp: 123,
+    summary: "Process failed.",
+    status: "exited",
+    exitCode: 1,
+    endReason: "exit",
+    signal: null,
+    attention: "turn",
+    ...overrides,
+  };
+}
+
+function piWithSendMessage(sendMessage: ReturnType<typeof vi.fn>) {
+  return { sendMessage, on: () => () => {} } as never;
+}
+
+function piWithNotificationApi() {
+  const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+  const sendMessage = vi.fn();
+  const sendUserMessage = vi.fn();
+  const pi = {
+    sendMessage,
+    sendUserMessage,
+    on: (event: string, handler: (event: never, ctx: never) => unknown) => {
+      handlers.set(event, handler);
+      return () => {};
+    },
+  } as never;
+  return { pi, handlers, sendMessage, sendUserMessage };
+}
+
+function fireLifecycle(
+  handlers: Map<string, (event: never, ctx: never) => unknown>,
+  events: string[],
+  idle: boolean,
+) {
+  const ctx = { isIdle: () => idle };
+  for (const event of events) {
+    handlers.get(event)?.({} as never, ctx as never);
+  }
+}
+
+describe("registerNotificationDelivery", () => {
+  it("sends a displayed custom message with attention-derived options", () => {
+    const events = createEventBus();
+    const sendMessage = vi.fn();
+    registerNotificationDelivery(events, piWithSendMessage(sendMessage));
+
+    events.emit(CHANNELS.NOTIFICATION, makePayload({ attention: "turn" }));
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const [message, options] = sendMessage.mock.calls[0];
+    expect(message.customType).toBe(MESSAGE_TYPE_PROCESS_NOTIFICATION);
+    expect(message.display).toBe(true);
+    expect(message.details.attention).toBe("turn");
+    expect(options.triggerTurn).toBe(true);
+    expect(options.deliverAs).toBe("steer");
+  });
+
+  it("maps context attention to a persisted non-turn message", () => {
+    const events = createEventBus();
+    const sendMessage = vi.fn();
+    registerNotificationDelivery(events, piWithSendMessage(sendMessage));
+
+    events.emit(CHANNELS.NOTIFICATION, makePayload({ attention: "context" }));
+
+    const [, options] = sendMessage.mock.calls[0];
+    expect(options.triggerTurn).toBe(false);
+    expect(options.deliverAs).toBeUndefined();
+  });
+
+  it("stops delivering after the disposer is called", () => {
+    const events = createEventBus();
+    const sendMessage = vi.fn();
+    const dispose = registerNotificationDelivery(
+      events,
+      piWithSendMessage(sendMessage),
+    );
+
+    dispose();
+    events.emit(CHANNELS.NOTIFICATION, makePayload());
+
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("caps log-match delivery, summarizes suppression, and exempts lifecycle events", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const events = createEventBus();
+    const sendMessage = vi.fn();
+    const dispose = registerNotificationDelivery(
+      events,
+      piWithSendMessage(sendMessage),
+    );
+
+    for (let index = 0; index < 30; index++) {
+      events.emit(
+        CHANNELS.NOTIFICATION,
+        makePayload({ kind: "log_match", attention: "turn" }),
+      );
+    }
+    expect(sendMessage).toHaveBeenCalledTimes(20);
+
+    events.emit(CHANNELS.NOTIFICATION, makePayload({ kind: "crash" }));
+    expect(sendMessage).toHaveBeenCalledTimes(21);
+    expect(sendMessage.mock.calls.at(-1)?.[0].details.kind).toBe("crash");
+
+    vi.advanceTimersByTime(60_000);
+    expect(sendMessage).toHaveBeenCalledTimes(22);
+    const [summary, options] = sendMessage.mock.calls.at(-1) ?? [];
+    expect(summary.details).toEqual(
+      expect.objectContaining({
+        kind: "log_match_suppressed",
+        summary: expect.stringContaining("Suppressed 10"),
+        attention: "context",
+      }),
+    );
+    expect(options).toEqual({ triggerTurn: false });
+
+    dispose();
+    vi.useRealTimers();
+  });
+});
+
+// Regression: idle turn notifications skip before_agent_start (#121).
+describe("idle turn notifications", () => {
+  it("keeps the steer wake while a run is active", () => {
+    const events = createEventBus();
+    const { pi, handlers, sendMessage, sendUserMessage } =
+      piWithNotificationApi();
+    registerNotificationDelivery(events, pi);
+    fireLifecycle(handlers, ["session_start", "agent_start"], false);
+
+    events.emit(CHANNELS.NOTIFICATION, makePayload({ attention: "turn" }));
+
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    const [, options] = sendMessage.mock.calls[0];
+    expect(options).toEqual({ triggerTurn: true, deliverAs: "steer" });
+  });
+
+  it("keeps the steer wake when no host context has been seen yet", () => {
+    const events = createEventBus();
+    const { pi, sendMessage, sendUserMessage } = piWithNotificationApi();
+    registerNotificationDelivery(events, pi);
+
+    events.emit(CHANNELS.NOTIFICATION, makePayload({ attention: "turn" }));
+
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    const [, options] = sendMessage.mock.calls[0];
+    expect(options).toEqual({ triggerTurn: true, deliverAs: "steer" });
+  });
+
+  it("delivers an idle turn notification without triggering the run itself, and wakes the host with a user message", () => {
+    const events = createEventBus();
+    const { pi, handlers, sendMessage, sendUserMessage } =
+      piWithNotificationApi();
+    registerNotificationDelivery(events, pi);
+    fireLifecycle(
+      handlers,
+      ["session_start", "turn_end", "agent_end", "agent_settled"],
+      true,
+    );
+
+    events.emit(CHANNELS.NOTIFICATION, makePayload({ attention: "turn" }));
+
+    const [message, options] = sendMessage.mock.calls[0] ?? [];
+    expect(message?.customType).toBe(MESSAGE_TYPE_PROCESS_NOTIFICATION);
+    expect(options?.triggerTurn).toBe(false);
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(sendUserMessage).toHaveBeenCalledWith("");
+  });
+
+  it("wakes an idle host only once until the woken run starts", () => {
+    const events = createEventBus();
+    const { pi, handlers, sendMessage, sendUserMessage } =
+      piWithNotificationApi();
+    registerNotificationDelivery(events, pi);
+    fireLifecycle(
+      handlers,
+      ["session_start", "turn_end", "agent_end", "agent_settled"],
+      true,
+    );
+
+    events.emit(CHANNELS.NOTIFICATION, makePayload({ attention: "turn" }));
+    events.emit(CHANNELS.NOTIFICATION, makePayload({ attention: "turn" }));
+
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    for (const [, options] of sendMessage.mock.calls) {
+      expect(options.triggerTurn).toBe(false);
+    }
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-arms the wake after the woken run completes", () => {
+    const events = createEventBus();
+    const { pi, handlers, sendUserMessage } = piWithNotificationApi();
+    registerNotificationDelivery(events, pi);
+    fireLifecycle(
+      handlers,
+      ["session_start", "turn_end", "agent_end", "agent_settled"],
+      true,
+    );
+
+    events.emit(CHANNELS.NOTIFICATION, makePayload({ attention: "turn" }));
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+
+    // The woken run starts and settles; the host is idle again.
+    fireLifecycle(
+      handlers,
+      ["agent_start", "turn_start", "turn_end", "agent_end", "agent_settled"],
+      true,
+    );
+
+    events.emit(CHANNELS.NOTIFICATION, makePayload({ attention: "turn" }));
+    expect(sendUserMessage).toHaveBeenCalledTimes(2);
+  });
+});

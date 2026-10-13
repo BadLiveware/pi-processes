@@ -8,6 +8,11 @@ Keep development details, testing notes, internal tool guidance, and docs build 
 
 ## Development
 
+Requirements:
+
+- Node.js `22.19.0` or newer
+- pnpm `11.5.1`
+
 Install dependencies:
 
 ```bash
@@ -17,20 +22,34 @@ pnpm install
 Run checks:
 
 ```bash
-pnpm lint
 pnpm typecheck
+pnpm lint
+pnpm test
+pnpm test:e2e
 ```
 
 ## Repository layout
 
-- `src/` - extension source
-- `src/tools/` - `process` tool and actions
-- `src/commands/` - `/ps` commands and settings UI
-- `src/hooks/` - lifecycle hooks, blocker, message rendering, widgets
-- `src/components/` - TUI components
+- `src/` - Pi-agnostic process management, types, protocol, and utilities
+- `extensions/processes/` - core extension, process tool (start, list, output, update, write, stop, clear), settings, lifecycle hooks, notifications, protocol handlers, `/ps`, `/ps:kill`, `/ps:clear`, and `/ps:settings`
+- `extensions/processes-logs/` - `/ps:logs` command and log overlay
+- `extensions/processes-dock/` - `/ps:dock`, `/ps:pin`, the dock widget, and the status widget
+- `extensions/shared/` - shared UI helpers (`statusDot`, `processStatusTone`, `LineComponent`, etc.) used across all three extensions
 - `skills/` - shipped package skills
 - `.agents/skills/` - local repo-only skills for development workflows
-- `.github/docs-site/` - isolated docs page build
+
+## Package metadata
+
+The package targets Pi `0.87.0`.
+
+Pi bundles core packages for extensions. Keep direct imports of these packages in `peerDependencies` with `"*"` ranges and exact local versions in `devDependencies`:
+
+- `@earendil-works/pi-ai`
+- `@earendil-works/pi-coding-agent`
+- `@earendil-works/pi-tui`
+- `typebox`
+
+Keep normal third-party runtime dependencies in `dependencies`.
 
 ## Internal behavior
 
@@ -58,14 +77,16 @@ pnpm lint
 pnpm typecheck
 ```
 
-Useful manual process scripts:
+Useful manual process scripts live under `tests/e2e/scripts/`:
 
 ```bash
-./test/test-output.sh
-./test/test-exit-success.sh 5
-./test/test-exit-failure.sh 5
-./test/test-exit-crash.sh 5
+./tests/e2e/scripts/continuous-output.sh   # long-running stdout
+./tests/e2e/scripts/error-log.sh            # interleaved info/error on stdout+stderr
+./tests/e2e/scripts/exited-task.sh          # finite, exits 0
+./tests/e2e/scripts/crash-on-file.sh <name>  # waits for a marker file then crashes
 ```
+
+See `.agents/skills/pi-processes-testing/SKILL.md` for the full manual QA workflow and the complete fixture script reference.
 
 ## Docs conventions
 
@@ -86,38 +107,15 @@ Avoid putting these in `README.md`:
 - detailed tool-call schemas
 - release workflow notes
 
-### Video placeholders
+### Docs page build
 
-Use HTML comments in `README.md`:
+The docs page is generated from `README.md` by an external build, not in this repo. Keep `README.md` self-contained with only standard markdown.
 
-```md
-<!-- VIDEO: {"id":"process-panel","title":"Browse and manage processes from the panel"} -->
-```
+## Future design notes
 
-GitHub ignores these comments. The docs page build turns them into video blocks.
+Unimplemented design notes live in `docs/`:
 
-Add one placeholder for each feature section.
+- `docs/future-cleanup-hooks.md` - planned `cleanup` support for `process start` / `process stop`
+- `docs/future-persistent-manager.md` - planned cross-session process persistence
 
-## Docs page build
-
-The generated docs page lives under `.github/docs-site/` and is isolated from the extension source.
-
-It reads `README.md`, converts markdown into structured content, replaces video placeholders, highlights code with Shiki, and builds a static page with Vite and Tailwind.
-
-The GitHub Actions workflow for this lives in `.github/workflows/docs-page.yml`.
-
-## Demo pattern
-
-For demo recording, use a small self-contained project with a realistic workflow.
-
-The best pattern used for this extension was a fake Northwind API project where Pi:
-
-1. starts a server in the background
-2. runs tests and sees failures
-3. runs migrations
-4. checks server logs
-5. updates seed data
-6. reruns tests
-7. cleans up the process
-
-That pattern shows why background processes matter in a normal task instead of showing features one by one.
+These describe intended future behavior, not current behavior. Active implementation work goes under `.agents/plans/`.

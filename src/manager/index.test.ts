@@ -1,0 +1,1147 @@
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+
+import { fs, vol } from "memfs";
+import {
+  afterEach,
+  assert,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import type { ManagerEvent } from "../types";
+import { LIVE_STATUSES } from "../types";
+import { ProcessManager } from ".";
+import {
+  FINISHED_RECORD_GRACE_MS,
+  MAX_FINISHED_RECORDS,
+  MAX_TAIL_READ_BYTES,
+} from "./limits";
+
+const fakeProcesses = new Map<number, FakeChildProcess>();
+let nextPid = 10_000;
+
+class FakeChildProcess extends EventEmitter {
+  pid: number | undefined = ++nextPid;
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+  stdin = new PassThrough();
+  killed = false;
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+
+  unref(): void {}
+
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    this.killed = true;
+    this.finish(null, signal);
+    return true;
+  }
+
+  finish(code: number | null, signal: NodeJS.Signals | null = null): void {
+    if (this.exitCode !== null || this.signalCode !== null) return;
+    this.exitCode = code;
+    this.signalCode = signal;
+    if (this.pid !== undefined) fakeProcesses.delete(this.pid);
+    this.stdout.end();
+    this.stderr.end();
+    queueMicrotask(() => this.emit("close", code, signal));
+  }
+}
+
+function emitCommandOutput(child: FakeChildProcess, command: string): void {
+  if (child.killed || child.stdout.writableEnded || child.stderr.writableEnded)
+    return;
+
+  if (command === "true") {
+    child.finish(0);
+    return;
+  }
+
+  if (command === "exit 1") {
+    child.finish(1);
+    return;
+  }
+
+  if (command.includes("sleep 60")) {
+    return;
+  }
+
+  if (command.startsWith("seq 1 ")) {
+    const count = Number(command.slice("seq 1 ".length));
+    for (let i = 1; i <= count; i++) child.stdout.write(`${i}\n`);
+    child.finish(0);
+    return;
+  }
+
+  if (command === "printf ready") {
+    child.stdout.write("ready");
+    child.finish(0);
+    return;
+  }
+
+  if (command.includes("echo err >&2") && command.includes("echo out")) {
+    child.stdout.write("out\n");
+    child.stderr.write("err\n");
+    child.finish(0);
+    return;
+  }
+
+  if (command.includes("echo marker; echo marker >&2")) {
+    child.stdout.write("marker\n");
+    child.stderr.write("marker\n");
+    child.finish(0);
+    return;
+  }
+
+  if (command.includes("echo ready")) {
+    child.stdout.write("ready\nready\nready\n");
+    child.finish(0);
+    return;
+  }
+
+  if (command.includes("echo done")) {
+    child.stdout.write("done\ndone\ndone\n");
+    child.finish(0);
+    return;
+  }
+
+  if (command === "echo err >&2") {
+    child.stderr.write("err\n");
+    child.finish(0);
+    return;
+  }
+
+  const echo = command.match(/^echo (.*)$/);
+  if (echo) {
+    child.stdout.write(`${echo[1]}\n`);
+    child.finish(0);
+    return;
+  }
+
+  child.finish(0);
+}
+
+vi.mock("../utils/command-executor", () => ({
+  resolveShellExecutable: vi.fn(() => "/bin/bash"),
+  spawnCommand: vi.fn((command: string) => {
+    const child = new FakeChildProcess();
+    if (command === "missing pid") child.pid = undefined;
+    if (command === "missing pid error") {
+      child.pid = undefined;
+      process.nextTick(() => {
+        child.emit(
+          "error",
+          Object.assign(new Error("spawn /bin/bash ENOENT"), {
+            code: "ENOENT",
+          }),
+        );
+      });
+    }
+    if (child.pid !== undefined) fakeProcesses.set(child.pid, child);
+    queueMicrotask(() => {
+      if (command === "spawn error") {
+        child.emit("error", new Error("spawn failed"));
+        return;
+      }
+      emitCommandOutput(child, command);
+    });
+    return child;
+  }),
+}));
+
+vi.mock("../utils", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../utils")>();
+  return {
+    ...actual,
+    isProcessGroupAlive: vi.fn((pid: number) => fakeProcesses.has(pid)),
+    killProcessGroup: vi.fn((pid: number, signal: NodeJS.Signals) => {
+      const child = fakeProcesses.get(pid);
+      if (child) child.kill(signal);
+    }),
+  };
+});
+
+beforeEach(() => {
+  vi.useRealTimers();
+  vol.reset();
+  fakeProcesses.clear();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+function waitForEnd(manager: ProcessManager, id: string): Promise<void> {
+  return new Promise((resolve) => {
+    const unsub = manager.onEvent((e) => {
+      if (e.type === "process_ended" && e.info.id === id) {
+        unsub();
+        resolve();
+      }
+    });
+  });
+}
+
+function waitForEndedCount(
+  manager: ProcessManager,
+  count: number,
+): Promise<void> {
+  let seen = 0;
+  return new Promise((resolve) => {
+    const unsub = manager.onEvent((e) => {
+      if (e.type !== "process_ended") return;
+      seen++;
+      if (seen < count) return;
+
+      unsub();
+      resolve();
+    });
+  });
+}
+
+function collectEvents(manager: ProcessManager): ManagerEvent[] {
+  const events: ManagerEvent[] = [];
+  manager.onEvent((e) => events.push(e));
+  return events;
+}
+
+describe("aggregate retention and automatic reaping", () => {
+  it("protects pending group members from reaping and resumes bounded retention when cleared", async () => {
+    vi.useFakeTimers();
+    using manager = new ProcessManager();
+    const held = manager.start("held", "true", "/tmp");
+    const running = manager.start("running", "sleep 60", "/tmp");
+    manager.monitorGroup("jobs", [held.id, running.id], { failFast: false });
+    const completed = waitForEndedCount(manager, MAX_FINISHED_RECORDS + 2);
+    for (let index = 0; index < MAX_FINISHED_RECORDS + 1; index++)
+      manager.start(`filler${index}`, "true", "/tmp");
+    await completed;
+    await vi.advanceTimersByTimeAsync(FINISHED_RECORD_GRACE_MS + 1);
+    expect(manager.get(held.id)?.success).toBe(true);
+    expect(manager.listGroups()[0].summary).toMatchObject({
+      succeeded: 1,
+      running: 1,
+    });
+    expect(manager.list()).toHaveLength(MAX_FINISHED_RECORDS + 2);
+    manager.clearGroup("jobs");
+    expect(manager.get(held.id)).toBeNull();
+    expect(manager.list()).toHaveLength(MAX_FINISHED_RECORDS + 1);
+  });
+});
+
+// --- Start / List / Get basics ---
+
+describe("start/list/get basics", () => {
+  it("starts a process and returns ProcessInfo", () => {
+    using manager = new ProcessManager();
+    const info = manager.start("test", "echo hello", "/tmp");
+
+    expect(info.id).toMatch(/^proc_[0-9a-f]{4}$/);
+    expect(info).toEqual(
+      expect.objectContaining({
+        name: "test",
+        command: "echo hello",
+        cwd: "/tmp",
+        status: "running",
+        success: null,
+        exitCode: null,
+        endTime: null,
+        endReason: null,
+        signal: null,
+        errorMessage: null,
+      }),
+    );
+    expect(info.pid).toBeGreaterThan(0);
+  });
+
+  it("lists processes in insertion order", () => {
+    using manager = new ProcessManager();
+    const info1 = manager.start("first", "echo one", "/tmp");
+    const info2 = manager.start("second", "echo two", "/tmp");
+
+    const list = manager.list();
+    expect(list.map((p) => p.id)).toEqual([info1.id, info2.id]);
+  });
+
+  it("gets a process by id", () => {
+    using manager = new ProcessManager();
+    const info = manager.start("test", "echo hello", "/tmp");
+
+    const got = manager.get(info.id);
+    assert(got, "process should exist");
+    expect(got).toEqual(expect.objectContaining({ id: info.id, name: "test" }));
+  });
+
+  it("returns null for unknown process id", () => {
+    using manager = new ProcessManager();
+    expect(manager.get("nonexistent")).toBeNull();
+  });
+});
+
+// --- Process lifecycle events ---
+
+describe("lifecycle events", () => {
+  it("emits process_started on start", () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    manager.start("test", "echo hi", "/tmp");
+
+    const started = events.filter((e) => e.type === "process_started");
+    expect(started).toHaveLength(1);
+    if (started[0].type === "process_started") {
+      expect(started[0].info).toEqual(
+        expect.objectContaining({ name: "test" }),
+      );
+    }
+  });
+
+  it("emits process_ended on exit", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "echo hi", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const ended = events.filter((e) => e.type === "process_ended");
+    expect(ended).toHaveLength(1);
+    if (ended[0].type === "process_ended") {
+      expect(ended[0].info).toEqual(
+        expect.objectContaining({
+          id: info.id,
+          status: "exited",
+          success: true,
+          exitCode: 0,
+          endReason: "exit",
+          signal: null,
+          errorMessage: null,
+        }),
+      );
+      expect(ended[0].info.endTime).not.toBeNull();
+    }
+  });
+
+  it("emits process_ended with success=false on failure", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "exit 1", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const ended = events.filter((e) => e.type === "process_ended");
+    if (ended[0].type === "process_ended") {
+      expect(ended[0].info).toEqual(
+        expect.objectContaining({
+          success: false,
+          exitCode: 1,
+          endReason: "exit",
+        }),
+      );
+    }
+  });
+
+  it("records signal metadata when a child closes from a signal", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "sleep 60", "/tmp");
+    const child = fakeProcesses.get(info.pid);
+    assert(child, "fake child should exist");
+
+    child.finish(null, "SIGTERM");
+    await waitForEnd(manager, info.id);
+
+    const ended = events.filter((e) => e.type === "process_ended");
+    if (ended[0].type === "process_ended") {
+      expect(ended[0].info).toEqual(
+        expect.objectContaining({
+          status: "killed",
+          success: false,
+          endReason: "signal",
+          signal: {
+            name: "SIGTERM",
+            number: 15,
+            description: "termination request",
+          },
+        }),
+      );
+    }
+  });
+
+  it("records spawn errors", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "spawn error", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const ended = events.filter((e) => e.type === "process_ended");
+    if (ended[0].type === "process_ended") {
+      expect(ended[0].info).toEqual(
+        expect.objectContaining({
+          status: "exited",
+          success: false,
+          exitCode: -1,
+          endReason: "spawn_error",
+          errorMessage: "spawn failed",
+        }),
+      );
+    }
+  });
+
+  it("records missing pid", () => {
+    using manager = new ProcessManager();
+    const info = manager.start("test", "missing pid", "/tmp");
+
+    expect(info).toEqual(
+      expect.objectContaining({
+        status: "exited",
+        success: false,
+        exitCode: -1,
+        endReason: "missing_pid",
+        errorMessage: "Spawn error: missing pid",
+      }),
+    );
+  });
+
+  it("handles async spawn errors on null-pid starts without crashing", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    // The async `error` event must be handled: attaching no listener would
+    // crash the host via uncaughtException and fail the whole test run.
+    const info = manager.start("test", "missing pid error", "/tmp");
+    await new Promise((r) => setImmediate(r));
+
+    const ended = events.filter((e) => e.type === "process_ended");
+    expect(ended).toHaveLength(1);
+    // The record is transitioned to exited synchronously; the async error
+    // handler then enriches it in place with the real reason.
+    const updated = manager.get(info.id);
+    expect(updated).toEqual(
+      expect.objectContaining({
+        status: "exited",
+        success: false,
+        exitCode: -1,
+        endReason: "spawn_error",
+        errorMessage: "spawn /bin/bash ENOENT",
+      }),
+    );
+  });
+
+  it("records lost processes found by liveness watcher", async () => {
+    vi.useFakeTimers();
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "sleep 60", "/tmp");
+
+    fakeProcesses.delete(info.pid);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const ended = events.filter((e) => e.type === "process_ended");
+    expect(ended).toHaveLength(1);
+    if (ended[0].type === "process_ended") {
+      expect(ended[0].info).toEqual(
+        expect.objectContaining({
+          status: "exited",
+          success: false,
+          endReason: "lost",
+          signal: null,
+        }),
+      );
+    }
+  });
+
+  it("emits processes_changed on clearFinished", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "echo hi", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    manager.clearFinished();
+
+    const changed = events.filter((e) => e.type === "processes_changed");
+    expect(changed).toHaveLength(1);
+  });
+});
+
+// --- Output throttling ---
+
+describe("process_output_changed", () => {
+  it("emits process_output_changed on stdout", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "echo hello", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const outputEvents = events.filter(
+      (e) => e.type === "process_output_changed",
+    );
+    expect(outputEvents.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("emits process_output_changed on stderr", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "echo err >&2", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const outputEvents = events.filter(
+      (e) => e.type === "process_output_changed",
+    );
+    expect(outputEvents.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("throttles rapid output", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "seq 1 200", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const outputEvents = events.filter(
+      (e) => e.type === "process_output_changed",
+    );
+    expect(outputEvents.length).toBeGreaterThanOrEqual(1);
+    expect(outputEvents.length).toBeLessThan(50);
+  });
+
+  it("final output event before process_ended", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "echo hello", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    let lastOutputIdx = -1;
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].type === "process_output_changed") {
+        lastOutputIdx = i;
+        break;
+      }
+    }
+    const endIdx = events.findIndex((e) => e.type === "process_ended");
+
+    expect(lastOutputIdx).toBeGreaterThanOrEqual(0);
+    expect(endIdx).toBeGreaterThanOrEqual(0);
+    expect(lastOutputIdx).toBeLessThan(endIdx);
+  });
+
+  it("no output events for silent process", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "true", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const outputEvents = events.filter(
+      (e) => e.type === "process_output_changed",
+    );
+    expect(outputEvents.length).toBe(0);
+  });
+
+  it("no stale events after clearFinished", async () => {
+    vi.useFakeTimers();
+    using manager = new ProcessManager();
+    const info = manager.start("test", "seq 1 50", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    manager.clearFinished();
+
+    const lateEvents: ManagerEvent[] = [];
+    manager.onEvent((e) => lateEvents.push(e));
+
+    await vi.runOnlyPendingTimersAsync();
+
+    const staleOutput = lateEvents.filter(
+      (e) => e.type === "process_output_changed",
+    );
+    expect(staleOutput.length).toBe(0);
+  });
+
+  it("output events include appendedText with new lines", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "echo hello", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const withAppended = events.filter(
+      (e): e is Extract<typeof e, { type: "process_output_changed" }> =>
+        e.type === "process_output_changed" && e.appendedText !== undefined,
+    );
+
+    for (const e of withAppended) {
+      assert(e.appendedText, "appendedText should be defined");
+      expect(Array.isArray(e.appendedText)).toBe(true);
+      for (const line of e.appendedText) {
+        expect(["stdout", "stderr"]).toContain(line.type);
+        expect(typeof line.text).toBe("string");
+      }
+    }
+  });
+
+  it("output events include final partial lines in appendedText", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "printf ready", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const outputEvents = events.filter(
+      (e): e is Extract<ManagerEvent, { type: "process_output_changed" }> =>
+        e.type === "process_output_changed",
+    );
+
+    expect(outputEvents).toContainEqual(
+      expect.objectContaining({
+        appendedText: [{ type: "stdout", text: "ready" }],
+      }),
+    );
+  });
+});
+
+// --- killAll ---
+
+describe("killAll", () => {
+  it("kills all running processes", async () => {
+    using manager = new ProcessManager();
+    manager.start("p1", "sleep 60", "/tmp");
+    manager.start("p2", "sleep 60", "/tmp");
+
+    const ended = waitForEndedCount(manager, 2);
+    manager.killAll();
+    await ended;
+
+    for (const p of manager.list()) {
+      expect(LIVE_STATUSES.has(p.status)).toBe(false);
+    }
+  });
+});
+
+// --- Kill ---
+
+describe("kill", () => {
+  it("returns not_found for unknown id", async () => {
+    using manager = new ProcessManager();
+    const result = await manager.kill("nonexistent");
+    expect(result).toEqual({
+      ok: false,
+      reason: "not_found",
+      info: expect.any(Object),
+    });
+  });
+
+  it("kills a running process", async () => {
+    vi.useFakeTimers();
+    using manager = new ProcessManager();
+    const info = manager.start("test", "sleep 60", "/tmp");
+    const resultPromise = manager.kill(info.id);
+
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await resultPromise;
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(["killed", "exited"]).toContain(result.info.status);
+      expect(result.info).toEqual(
+        expect.objectContaining({
+          success: false,
+          endReason: "signal",
+          signal: expect.objectContaining({ name: "SIGTERM", number: 15 }),
+        }),
+      );
+    }
+  });
+
+  it("records kill timeout", async () => {
+    vi.useFakeTimers();
+    using manager = new ProcessManager();
+    const info = manager.start("test", "sleep 60", "/tmp");
+    const child = fakeProcesses.get(info.pid);
+    assert(child, "fake child should exist");
+    child.kill = () => {
+      child.killed = true;
+      return true;
+    };
+
+    const resultPromise = manager.kill(info.id);
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await resultPromise;
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "timeout",
+      info: expect.objectContaining({
+        status: "terminate_timeout",
+        success: false,
+        endReason: "kill_timeout",
+        signal: expect.objectContaining({ name: "SIGTERM", number: 15 }),
+        endTime: expect.any(Number),
+      }),
+    });
+  });
+
+  it("does not reclassify a timed-out process on the liveness tick", async () => {
+    vi.useFakeTimers();
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "sleep 60", "/tmp");
+    const child = fakeProcesses.get(info.pid);
+    assert(child, "fake child should exist");
+    // Make kill() a no-op so the process appears unkillable -> timeout.
+    child.kill = () => {
+      child.killed = true;
+      return true;
+    };
+
+    const resultPromise = manager.kill(info.id);
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await resultPromise;
+    assert(!result.ok && result.reason === "timeout", "expected timeout");
+
+    // Now the process dies for real (the OS reaps it). The liveness tick must
+    // NOT reclassify it to killed/lost, clobber endReason, or emit a second
+    // process_ended. The kill() path already finalized it.
+    const endedBefore = events.filter((e) => e.type === "process_ended").length;
+    fakeProcesses.delete(info.pid);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const endedAfter = events.filter((e) => e.type === "process_ended").length;
+    expect(endedAfter).toBe(endedBefore);
+
+    const record = manager.get(info.id);
+    assert(record, "record should still exist");
+    expect(record).toEqual(
+      expect.objectContaining({
+        status: "terminate_timeout",
+        endReason: "kill_timeout",
+      }),
+    );
+  });
+
+  it("returns ok for already-exited process", async () => {
+    using manager = new ProcessManager();
+    const info = manager.start("test", "echo hi", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const result = await manager.kill(info.id);
+    expect(result).toEqual({ ok: true, info: expect.any(Object) });
+  });
+});
+
+// --- Write to stdin ---
+
+describe("writeToStdin", () => {
+  it("returns not_found for unknown id", () => {
+    using manager = new ProcessManager();
+    expect(manager.writeToStdin("nonexistent", "hello")).toEqual({
+      ok: false,
+      reason: "not_found",
+    });
+  });
+
+  it("returns process_exited for finished process", async () => {
+    using manager = new ProcessManager();
+    const info = manager.start("test", "echo hi", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    expect(manager.writeToStdin(info.id, "hello")).toEqual({
+      ok: false,
+      reason: "process_exited",
+    });
+  });
+
+  it("writes to stdin of running process", () => {
+    using manager = new ProcessManager();
+    const info = manager.start(
+      "test",
+      "bash -c 'cat > /dev/null; sleep 60'",
+      "/tmp",
+    );
+
+    expect(manager.writeToStdin(info.id, "hello\n")).toEqual({ ok: true });
+  });
+
+  it("returns stdin_closed after end()", () => {
+    using manager = new ProcessManager();
+    const info = manager.start(
+      "test",
+      "bash -c 'cat > /dev/null; sleep 60'",
+      "/tmp",
+    );
+
+    expect(manager.writeToStdin(info.id, "hello\n", { end: true })).toEqual({
+      ok: true,
+    });
+    expect(manager.writeToStdin(info.id, "more\n")).toEqual({
+      ok: false,
+      reason: "stdin_closed",
+    });
+  });
+});
+
+// --- clearFinished ---
+
+describe("clearFinished", () => {
+  it("clears finished processes and returns count", async () => {
+    using manager = new ProcessManager();
+    const info = manager.start("test", "echo hi", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    expect(manager.clearFinished()).toBe(1);
+    expect(manager.get(info.id)).toBeNull();
+  });
+
+  it("does not clear running processes", () => {
+    using manager = new ProcessManager();
+    manager.start("test", "sleep 60", "/tmp");
+
+    expect(manager.clearFinished()).toBe(0);
+  });
+
+  it("emits processes_changed when clearing", async () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const info = manager.start("test", "echo hi", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    manager.clearFinished();
+
+    const changed = events.filter((e) => e.type === "processes_changed");
+    expect(changed).toHaveLength(1);
+  });
+});
+
+describe("finished record reaping", () => {
+  it("keeps recent records then reaps the oldest records after the grace period", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    using manager = new ProcessManager();
+    const infos = [];
+    const stdoutFiles: string[] = [];
+
+    for (let index = 0; index < MAX_FINISHED_RECORDS + 10; index++) {
+      const info = manager.start(`task-${index}`, "true", "/tmp");
+      const ended = waitForEnd(manager, info.id);
+      await ended;
+      infos.push(info);
+      stdoutFiles.push(info.stdoutFile);
+      vi.advanceTimersByTime(1);
+    }
+
+    expect(manager.list()).toHaveLength(MAX_FINISHED_RECORDS + 10);
+    expect(fs.existsSync(stdoutFiles[0] ?? "")).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(FINISHED_RECORD_GRACE_MS + 10);
+
+    const survivors = manager.list();
+    expect(survivors).toHaveLength(MAX_FINISHED_RECORDS);
+    expect(survivors.map((info) => info.id)).toEqual(
+      infos.slice(-MAX_FINISHED_RECORDS).map((info) => info.id),
+    );
+    expect(fs.existsSync(stdoutFiles[0] ?? "")).toBe(false);
+  });
+
+  it("uses completion order when end times are equal", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    using manager = new ProcessManager();
+    const infos = Array.from({ length: MAX_FINISHED_RECORDS + 2 }, (_, index) =>
+      manager.start(`task-${index}`, "sleep 60", "/tmp"),
+    );
+    const ended = waitForEndedCount(manager, infos.length);
+
+    for (const info of [...infos].reverse()) {
+      const child = fakeProcesses.get(info.pid);
+      assert(child, "fake child should exist");
+      child.finish(0);
+    }
+    await ended;
+    await vi.advanceTimersByTimeAsync(FINISHED_RECORD_GRACE_MS);
+
+    expect(manager.list().map((info) => info.id)).toEqual(
+      infos.slice(0, MAX_FINISHED_RECORDS).map((info) => info.id),
+    );
+  });
+});
+
+// --- Output retrieval ---
+
+describe("output retrieval", () => {
+  it("getOutput returns stdout/stderr lines", async () => {
+    using manager = new ProcessManager();
+    const info = manager.start("test", "echo hello", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const output = manager.getOutput(info.id);
+    assert(output, "output should exist");
+    expect(output.stdout).toContain("hello");
+  });
+
+  it("getOutput returns null for unknown id", () => {
+    using manager = new ProcessManager();
+    expect(manager.getOutput("nonexistent")).toBeNull();
+  });
+
+  it("getCombinedOutput returns tagged lines", async () => {
+    using manager = new ProcessManager();
+    const info = manager.start(
+      "test",
+      "bash -c 'echo out; echo err >&2'",
+      "/tmp",
+    );
+    await waitForEnd(manager, info.id);
+
+    const combined = manager.getCombinedOutput(info.id);
+    assert(combined, "combined output should exist");
+    expect(combined.length).toBeGreaterThanOrEqual(2);
+    expect(
+      combined.filter((l) => l.type === "stdout").length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      combined.filter((l) => l.type === "stderr").length,
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  it("getLogFiles returns file paths", async () => {
+    using manager = new ProcessManager();
+    const info = manager.start("test", "echo hi", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const files = manager.getLogFiles(info.id);
+    assert(files, "log files should exist");
+    expect(files).toEqual(
+      expect.objectContaining({
+        stdoutFile: expect.stringContaining("stdout"),
+        stderrFile: expect.stringContaining("stderr"),
+        combinedFile: expect.stringContaining("combined"),
+      }),
+    );
+  });
+
+  it("getFileSize returns sizes", async () => {
+    using manager = new ProcessManager();
+    const info = manager.start("test", "echo hello world", "/tmp");
+    await waitForEnd(manager, info.id);
+
+    const sizes = manager.getFileSize(info.id);
+    assert(sizes, "file sizes should exist");
+    expect(sizes.stdout).toBeGreaterThan(0);
+  });
+});
+
+// --- Adopt ---
+
+describe("adopt", () => {
+  function makeAdoptableChild(): FakeChildProcess {
+    const child = new FakeChildProcess();
+    if (child.pid !== undefined) fakeProcesses.set(child.pid, child);
+    return child;
+  }
+
+  function asChildProcess(child: FakeChildProcess): ChildProcess {
+    return child as unknown as ChildProcess;
+  }
+
+  it("adopts a running child and returns running ProcessInfo", () => {
+    using manager = new ProcessManager();
+    const child = makeAdoptableChild();
+
+    const info = manager.adopt("bg", "sleep 60", "/tmp", asChildProcess(child));
+
+    expect(info.id).toMatch(/^proc_[0-9a-f]{4}$/);
+    expect(info).toEqual(
+      expect.objectContaining({
+        name: "bg",
+        command: "sleep 60",
+        cwd: "/tmp",
+        pid: child.pid,
+        status: "running",
+      }),
+    );
+  });
+
+  it("backdates startTime when provided", () => {
+    using manager = new ProcessManager();
+    const child = makeAdoptableChild();
+    const startTime = Date.now() - 30_000;
+
+    const info = manager.adopt(
+      "bg",
+      "sleep 60",
+      "/tmp",
+      asChildProcess(child),
+      {
+        startTime,
+      },
+    );
+
+    expect(info.startTime).toBe(startTime);
+  });
+
+  it("emits process_started on adoption", () => {
+    using manager = new ProcessManager();
+    const events = collectEvents(manager);
+    const child = makeAdoptableChild();
+
+    const info = manager.adopt("bg", "sleep 60", "/tmp", asChildProcess(child));
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "process_started",
+        info: expect.objectContaining({ id: info.id }),
+      }),
+    ]);
+  });
+
+  it("prepends initialStdout ahead of post-adoption stdout", async () => {
+    using manager = new ProcessManager();
+    const child = makeAdoptableChild();
+
+    const info = manager.adopt(
+      "bg",
+      "echo before; echo after",
+      "/tmp",
+      asChildProcess(child),
+      { initialStdout: Buffer.from("before\n") },
+    );
+
+    child.stdout.write("after\n");
+    child.finish(0);
+    await waitForEnd(manager, info.id);
+
+    const output = manager.getOutput(info.id);
+    assert(output, "output should exist");
+    expect(output.stdout.indexOf("before")).toBeGreaterThanOrEqual(0);
+    expect(output.stdout.indexOf("after")).toBeGreaterThan(
+      output.stdout.indexOf("before"),
+    );
+  });
+
+  it("routes initialStderr to the stderr log, not stdout", async () => {
+    using manager = new ProcessManager();
+    const child = makeAdoptableChild();
+
+    const info = manager.adopt(
+      "bg",
+      "echo out; err",
+      "/tmp",
+      asChildProcess(child),
+      { initialStderr: Buffer.from("early-err\n") },
+    );
+
+    child.stderr.write("late-err\n");
+    child.finish(0);
+    await waitForEnd(manager, info.id);
+
+    const output = manager.getOutput(info.id);
+    assert(output, "output should exist");
+    expect(output.stderr.indexOf("early-err")).toBeGreaterThanOrEqual(0);
+    expect(output.stderr.indexOf("late-err")).toBeGreaterThan(
+      output.stderr.indexOf("early-err"),
+    );
+    expect(output.stdout.indexOf("early-err")).toBe(-1);
+  });
+
+  it("clamps initialStdout to MAX_TAIL_READ_BYTES (tail kept)", async () => {
+    using manager = new ProcessManager();
+    const child = makeAdoptableChild();
+
+    const big = Buffer.alloc(MAX_TAIL_READ_BYTES + 10_000, 0x41); // 'A'
+    const tail = "TAIL_MARKER\n";
+    const initialStdout = Buffer.concat([big, Buffer.from(tail)]);
+
+    const info = manager.adopt(
+      "bg",
+      "sleep 60",
+      "/tmp",
+      asChildProcess(child),
+      { initialStdout },
+    );
+    child.finish(0);
+    await waitForEnd(manager, info.id);
+
+    const output = manager.getOutput(info.id, 5000);
+    assert(output, "output should exist");
+    const fullStdout = output.stdout.join("\n");
+    expect(fullStdout).toContain("TAIL_MARKER");
+    // The clamped buffer should not exceed MAX_TAIL_READ_BYTES.
+    expect(Buffer.byteLength(fullStdout)).toBeLessThanOrEqual(
+      MAX_TAIL_READ_BYTES + 100, // allow for line-splitting overhead
+    );
+  });
+
+  it("detects exit of an adopted child", async () => {
+    using manager = new ProcessManager();
+    const child = makeAdoptableChild();
+
+    const info = manager.adopt("bg", "sleep 60", "/tmp", asChildProcess(child));
+    child.finish(0);
+    await waitForEnd(manager, info.id);
+
+    const ended = manager.get(info.id);
+    assert(ended, "process should exist");
+    expect(ended.status).toBe("exited");
+    expect(ended.exitCode).toBe(0);
+    expect(ended.success).toBe(true);
+    expect(ended.endReason).toBe("exit");
+  });
+
+  it("finalizes via pending close when child exited before adoption", async () => {
+    using manager = new ProcessManager();
+    const child = makeAdoptableChild();
+    child.stdout.write("done\n");
+    child.finish(0);
+
+    const info = manager.adopt(
+      "bg",
+      "echo done",
+      "/tmp",
+      asChildProcess(child),
+    );
+    await waitForEnd(manager, info.id);
+
+    const ended = manager.get(info.id);
+    assert(ended, "process should exist");
+    expect(ended.status).toBe("exited");
+    expect(ended.exitCode).toBe(0);
+    expect(ended.success).toBe(true);
+  });
+
+  it("finalizes immediately when close fired before adoption", async () => {
+    using manager = new ProcessManager();
+    const child = makeAdoptableChild();
+    child.finish(0);
+    // Let the queued close event fire and the streams settle pre-adoption.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    child.stdout.destroy();
+    child.stderr.destroy();
+
+    const info = manager.adopt("bg", "true", "/tmp", asChildProcess(child));
+
+    const ended = manager.get(info.id);
+    assert(ended, "process should exist");
+    expect(ended.status).toBe("exited");
+    expect(ended.exitCode).toBe(0);
+    expect(ended.success).toBe(true);
+    expect(ended.endReason).toBe("exit");
+  });
+
+  it("kills an adopted process", async () => {
+    using manager = new ProcessManager();
+    const child = makeAdoptableChild();
+
+    const info = manager.adopt("bg", "sleep 60", "/tmp", asChildProcess(child));
+    const result = await manager.kill(info.id);
+
+    expect(result.ok).toBe(true);
+    expect(result.info.status).toBe("killed");
+    expect(child.killed).toBe(true);
+  });
+
+  it("records a spawn-error process when the child has no pid", () => {
+    using manager = new ProcessManager();
+    const child = new FakeChildProcess();
+    child.pid = undefined;
+
+    const info = manager.adopt("bg", "true", "/tmp", asChildProcess(child));
+
+    expect(info.status).toBe("exited");
+    expect(info.endReason).toBe("missing_pid");
+    expect(info.success).toBe(false);
+  });
+});

@@ -1,5 +1,343 @@
 # @aliou/pi-processes
 
+## 0.13.2
+
+### Patch Changes
+
+- b17b6bb: Click a log-match notification in the transcript to toggle its detail line, and click the dock to toggle it between collapsed and expanded. Both are fullscreen-only (regular mode leaves the mouse to the terminal); the keyboard paths (expand toggle, `/ps:dock`) are unchanged.
+
+## 0.13.1
+
+### Patch Changes
+
+- 1a92e29: Fold failed and killed processes into `! N failed` and `■ N killed` summary tokens in the status widget, mirroring the existing `✓ N done` token. A new failure stays individual until the next process starts, then folds into the summaries.
+- 9efa0c8: Inject the session `PI_*` variables (`PI_SESSION_ID`, `PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`, `PI_REASONING_LEVEL`) into processes started via the `process` tool's `start` action, mirroring the environment pi's bash tool exposes.
+
+## 0.13.0
+
+### Minor Changes
+
+- 4d53443: Persist context-level notifications immediately instead of deferring them to the next user prompt
+
+  `context` and emitted `ignore` notifications (watch log matches, suppressed-match summaries, `onKilled: "context"`) are now sent with `triggerTurn: false` and no `deliverAs`, so Pi appends them as displayed custom messages right away — immediately when the agent is idle, and after the running turn's tool results otherwise. They still never wake or steer the agent.
+
+  Requires the Pi extension host that appends custom messages at the turn's tool boundary (pi 0.84.4+, which fixed the mid-run append that made Anthropic requests 400). Peer ranges stay `*`, so there is no enforced floor: on pi ≤0.84.3 this option shape is unsafe (≤0.84.1 steers the active run; 0.84.2–0.84.3 appends mid-run and 400s). This release is developed and tested against pi 0.87.0, which the devDependencies pin.
+
+  Previously these messages waited for the next user prompt: nothing appeared in the UI and nothing entered model context until the user typed again.
+
+  Also bumps the tested pi toolchain to 0.87.0 (devDependencies only; peer ranges remain `*`).
+
+- c3a8e28: Adopt pi's structured tool-output contract for the `process` tool
+
+  The `process` tool now declares `ProcessToolOutputSchema`, a single union schema discriminated by `action` (pi allows one `outputSchema` per tool, so per-action schemas are impossible), and every action returns `structuredContent` alongside the model-facing text. Codemode scripts that call the nested process tool receive structured objects instead of parsing the text preview; model-facing `content` and the TUI renderers are unchanged.
+
+  Every shape is declared once, schema-first: shared shapes live next to their owners — `ProcessInfoSchema` and the status/reason tuples in `src/types.ts`, the log-matcher/notify schemas in the notifications registry, match modes in `src/utils/match-line` — and each action's details type is _derived_ from its member schema (`Static`), so the input schema, runtime config, details types, and structured output cannot drift apart. The only hand-kept translation left is pi's `TruncationResult` (a TS interface, not a schema), mirrored for the output truncation and enforced at its single assignment site.
+
+  The `output` action's payload additionally carries the raw filtered selection lines behind the preview, bounded by `tailLines` (≤2000 per stream) and the 5000-line scan window rather than the preview byte limit, mirroring pi's `bash` contract. Those line arrays live only in `structuredContent`: pi persists `details` in the session transcript but never persists `structuredContent`, so the transcript entry stays bounded while codemode callers get the full selection. `truncation` still describes only the model-facing preview.
+
+  Also bumps the tested pi toolchain to 1.0.0 (`@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`; devDependencies only, peer ranges remain `*` and optional). `typebox` stays at 1.3.27, the exact version pi 1.0.0 bundles.
+
+### Patch Changes
+
+- 6708947: Fire `before_agent_start` for turns woken by process notifications on an idle host
+
+  When the host agent is idle, `turn` notifications are now persisted as displayed custom messages with `triggerTurn: false`, and the host is woken with a user message instead of a `triggerTurn` steer. A steer wake on an idle host starts the run through Pi's custom-message path, which never fires `before_agent_start` (#121), so the woken turn ran without system-prompt additions from that hook — and setups that require them rejected the request outright. The user-message wake goes through `pi.prompt()`, which fires `before_agent_start` like a user-typed prompt.
+
+  While a run is active — or before any host lifecycle event has been observed — delivery still steers the active run unchanged. The delivery listener tracks host idleness from the session lifecycle, where `agent_settled` is the idle signal (`ctx.isIdle()` is still false in `agent_end` and `turn_end` handlers), sends at most one wake until the woken run starts, and re-arms once the host is idle again.
+
+## 0.12.0
+
+### Minor Changes
+
+- 860d98e: Add an adopt API so other extensions can hand an already-running child process over to the manager. `ProcessManager.adopt(name, command, cwd, child, { initialStdout, initialStderr, startTime })` registers an externally spawned child (detached process group, piped stdio) as a managed process, and the new `processes:command:adopt` event-bus channel exposes it cross-extension. Adopted processes get the full managed lifecycle: log capture (including output produced before the handover), liveness watching, kill/stop, notifications, and dock/`/ps` visibility. This enables tools like a bash override that moves a long-running foreground command into the background without losing output.
+
+## 0.11.2
+
+### Patch Changes
+
+- 622ee56: Fix session corruption when `context`/`ignore` notifications fire mid tool call. Pi appends non-turn custom messages directly into message history, so one arriving between an assistant `tool_use` and its pending `tool_result` made every later Anthropic request 400 until compaction or `/new`. These notifications now use `nextTurn` delivery, which safely defers them until the next user prompt. `turn` notifications are unaffected.
+
+## 0.11.1
+
+### Patch Changes
+
+- 07ad522: Fix the process dock remaining visible after unpinning a finished process from `/ps` when no managed processes are still running.
+
+## 0.11.0
+
+### Minor Changes
+
+- 2eff528: The `/ps:logs` overlay now has an opt-in soft-wrap mode (`w` key toggle).
+  When enabled, long log lines expand into multiple display rows instead of
+  being hard-clipped, making full content visible. Truncation remains the
+  default for the `/ps` overview, dock, and the logs overlay.
+- ca7c31d: The `/ps:logs` overlay now supports page scrolling: `PageUp`/`PageDown`
+  move by a full viewport and `ctrl+u`/`ctrl+d` by half a viewport.
+
+  Footers (`/ps` overview and `/ps:logs` overlay) now render compact
+  shortcut hints: when a hint's key letter appears in its word, only the
+  word is shown with the key highlighted in accent + bold ("w wrap" becomes
+  "wrap"). When the hint list does not fit the footer width, a leading
+  "? more" affordance appears; pressing `?` opens a stacked shortcuts
+  overlay listing every available key.
+
+### Patch Changes
+
+- bb2666a: Fix the process dock not auto-closing after very short-lived processes.
+  `hasSeenRunningProcess` is now set synchronously in the `STARTED` event
+  handler (`handleStarted`) rather than only inside the throttled
+  `hardRefresh`. Previously, a process that exited within the 125ms
+  `scheduleRefresh` throttle window on a fresh session never set the flag,
+  so the auto-close condition in `hardRefresh` never fired and the dock
+  stayed open showing the finished process.
+- 41a0bfd: Intentional process kills via /ps are now delivered as a context-level
+  notification instead of being fully suppressed. The agent is not woken,
+  but it receives the lifecycle message so it can keep its state accurate.
+- 30163ff: Fixed a dead zone in the `/ps:logs` overlay where up to a screenful of
+  scroll keypresses could be swallowed. The clamped viewport end is now
+  written back to the scroll anchor in both the truncated and full render
+  paths, so every keypress moves the view.
+
+## 0.10.9
+
+### Patch Changes
+
+- 6e76b70: Update `@aliou/sh` from ^0.1.0 to ^0.2.2. Adapts `shell-utils` word stringification to the new AST: structured parameter expansions (`exp`/`slice`/`replace`/`index`), typed arithmetic expressions, and the new `BraceExp`/`ExtGlob` word parts.
+
+## 0.10.8
+
+### Patch Changes
+
+- d5643bc: Detect tool render themes by shape instead of class identity so Pi and oh-my-pi render process calls correctly when package copies differ.
+
+## 0.10.7
+
+### Patch Changes
+
+- 91adc0e: Support oh-my-pi's `renderCall(args, options, theme)` argument order.
+
+  pi invokes `renderCall(args, theme, context)` while oh-my-pi passes the
+  render options second and the theme third (documented in OMP's
+  docs/extensions.md). The tool call renderer now detects pi's order by its
+  `Theme` class instance and normalizes both orders, fixing
+  `TypeError: theme.fg is not a function` crashes when rendering `process`
+  tool calls under oh-my-pi. Supersedes #55.
+
+## 0.10.6
+
+### Patch Changes
+
+- 6ec7e61: Adopt versioned config migrations from `@aliou/pi-utils-settings` 0.19.1.
+
+  Migrations now declare a semver `version` and the loader stamps settings files
+  automatically: the v0.9.4 shape migration targets `0.10.0`, and a terminal
+  migration stamps every config with `0.10.6`. Settings files get
+  `"version": "0.10.6"` on next load; no other user-visible change.
+
+  `schema.json` is now generated by the bundled `pi-settings-schema` CLI, which
+  owns the reserved `$schema` and `version` keys.
+
+## 0.10.5
+
+### Patch Changes
+
+- 4ffc66e: Tweak process output and watch matcher rendering.
+
+  Collapsed process output now separates the header from the preview with an
+  empty line, and the `filter:` label uses a distinct tone from the pattern
+  value. Pattern filters are quoted: double quotes for literal matches, single
+  quotes when the literal contains a double quote, and slashes for regex.
+  Expanded watch matcher lines in `start` and `update` apply the same quoting.
+
+- c7f60f6: Improve the expanded process notification message (log match or process end).
+
+  The expanded detail line now honors the `outputPad` setting instead of a
+  hardcoded value, no longer leaves a blank line between the summary and
+  detail line, and colors each field to match existing conventions elsewhere
+  in the extension (status/exit tone, accent pattern). Log match
+  notifications now surface the matched pattern and stream in the expanded
+  view, and kill notifications surface signal details.
+
+  The `attention` field is renamed to `notify` and reads in plain language
+  (`now` / `next turn` / `silent`) instead of the raw `turn` / `context` /
+  `ignore` enum. The log match `stream` field no longer repeats `literal` or
+  `regex`, since the pattern itself is now quoted (`"..."`) or slash-wrapped
+  (`/.../`) to show that.
+
+## 0.10.4
+
+### Patch Changes
+
+- 94bf16e: Render carriage-return progress output as the final visible update in `/ps:logs` and the dock.
+
+  Log watches now match the same plain visible line shown in the UI, so hidden CR-overwritten text, dropped escape payloads, and invisible styling bytes no longer trigger notifications.
+
+## 0.10.3
+
+### Patch Changes
+
+- 7031d86: Default `notify.onSuccess` to `turn` so a finished process wakes an idle agent.
+
+  Under v0.9.5 the flat `alertOnSuccess: true` boolean was clear enough that the agent set it on almost every start, so a completed build, test run, or encode always got a turn. The 0.10 rewrite replaced it with `notify.onSuccess`, defaulting to `context`, and the agent stopped opting in. `context` only reaches the agent if it happens to still be streaming when the process ends; an idle agent is never woken, so long one-shot commands finished silently and the user had to prod the agent.
+
+  Servers and watchers that should not interrupt on a clean exit can still pass `notify.onSuccess: "context"`.
+
+  The tool descriptions, prompt guidelines, and skill now state plainly that only `turn` reaches an idle agent, instead of claiming every exit notification brings the agent back.
+
+## 0.10.2
+
+### Patch Changes
+
+- 000e0dc: Sanitize process output before rendering it in the `/ps:logs` overlay and the `/ps` preview. Both paths rendered raw log text since the 0.10 rewrite, so cursor movement, screen erase, alternate-screen switches, scroll regions, OSC/DCS/APC strings, and stray carriage returns reached the terminal and could corrupt the whole screen. v0.9.5 stripped these at render; the rewrite dropped that step.
+
+  Escape sequences other than SGR colors are now removed, tabs are expanded so measured width matches drawn width, and colors are preserved (v0.9.5 dropped them). The dock gets the same treatment on top of its existing strip.
+
+- e4d6cc5: Sanitize and width-truncate every place that renders process-controlled text: the `/ps` list, the dock tab strip, log labels and status widget, the pickers and completions, `/ps:kill` notifications, the plain-mode process lists, the process tool renders, and the notification summary. A name, command, or matched log line carrying an escape sequence could otherwise drive the terminal.
+
+  Commands and names are now measured in terminal cells rather than JavaScript characters, so a wide-character name no longer draws 21 columns in a 12-column dock tab and emoji are no longer cut mid-surrogate. Colors cut off by truncation are re-closed instead of bleeding into the rest of the frame.
+
+- 5c00907: Use one ANSI-safe `truncateToWidth` across every extension. Pi's version injects `ESC[0m` after the kept prefix and around the ellipsis, which ends a caller-applied background or foreground early and leaves the ellipsis and padding unstyled; it also mis-parses CSI sequences that do not end in `m`, `G`, `K`, `H`, or `J`, and can swallow visible text. The repo already had a corrected fork used by three tool renderers only. It now lives in `extensions/shared/truncate.ts`, has tests, and is used by the `/ps` overview, the `/ps:logs` overlay, and the dock as well.
+- bf76d4d: Render log lines through one shared helper in the `/ps` preview, the `/ps:logs` overlay, and the dock. The three views each had their own copy of sanitize, truncate, and stream/match toning, which is how the overlay and preview ended up missing sanitization in the first place. The dock now shows process colors like the other two views.
+
+## 0.10.1
+
+### Patch Changes
+
+- 544cdf3: Guard process-group helpers against non-positive pgids. `isProcessGroupAlive` now returns `false` and `killProcessGroup` now throws a `RangeError` when given a `0` or negative process-group ID, instead of probing or signaling the caller's own process group.
+- 4cdc5c4: Handle async spawn errors on failed starts. When a spawn fails during initialization (e.g. a non-existent cwd), the child has no pid and emits its `error` event asynchronously; the null-pid path now attaches an error listener so the failure is captured on the record (real `ENOENT`/`EACCES` reason) instead of crashing the host via `uncaughtException`.
+
+## 0.10.0
+
+### Minor Changes
+
+- a146230: Bound in-memory process output by both line count and a new configurable byte budget. `/ps`, `/ps:logs`, and the dock now append live output without repeatedly reading full log files, and show a marker when a burst drops lines.
+- 530dd99: Create the per-session log directory lazily, so a session that never starts a process leaves no temp directory behind. Cap each log file at 64 MB via truncate-and-restart; when a file exceeds the cap it is reset to a marker line and writing continues, so old history is discarded to bound disk (and RAM on tmpfs) usage. Budget ~128-192 MB per process.
+- e6937a3: Rewrite `@aliou/pi-processes` into a pi-agnostic core plus three focused Pi extensions, each owning a self-contained UI.
+
+  ## One package, three extensions
+
+  - `extensions/processes` — the core: the `process` tool, settings, notifications, and the `/ps` overview panel, `/ps:kill`, `/ps:clear`, `/ps:settings`.
+  - `extensions/processes-logs` — the `/ps:logs` log overlay with per-process tabs, stream filtering, follow, and search.
+  - `extensions/processes-dock` — the dock UI: `/ps:dock`, `/ps:pin`, the dock widget, and the status widget.
+  - `extensions/shared` — shared UI primitives (`statusDot`, `processStatusTone`, `LineComponent`) so all three extensions render status the same way.
+  - `src/` — the pi-agnostic process manager. No UI, no Pi imports.
+
+  ## Harmonized UI
+
+  - One status-dot glyph system across the `/ps` panel, the `/ps:logs` overlay tabs, and the dock. Every surface shows the same running / terminating / killed / success / failure states.
+  - The panel, overlay, and dock read from the same shared helpers, so truncation, color, and status tone never drift between surfaces.
+  - `/ps` Enter pins to the dock (pin/unpin toggle) instead of focusing.
+  - The status widget below the editor shares the same dot system and reflows on terminal resize with `+N more` overflow.
+
+  ## Better log watches
+
+  - Watches are manageable at runtime via the new `process update` action: add, replace, remove, or clear watches on a running process without restarting it.
+  - `start` and `list` output show active watches, and the `/ps:logs` overlay highlights matches.
+  - Stale log-match notifications are suppressed after a process ends or is cleared — watches are unregistered on `process_ended`, so belated output events for a cleared id short-circuit instead of flooding the conversation. Closes #54.
+  - Empty match patterns (literal and regex) are rejected at `start`.
+
+  ## Process tool
+
+  Seven actions: `start`, `list`, `output`, `update`, `write`, `stop`, `clear`.
+
+  - `start` restores the `cwd` parameter.
+  - `output` filters by stream (stdout/stderr/both) and matches patterns.
+  - `write` sends stdin and optionally closes it; no-op calls are rejected.
+  - `clear` removes finished process entries.
+
+  ## `/ps:logs` overlay
+
+  - Per-process tabs (`tab`), stream cycling (`s`), follow toggle (`f`), search (`/`), match navigation (`n`/`N`), jump-to-bottom (`G`), close (`q`).
+  - `LogFileViewer` is cached per process across tab switches.
+  - Tab labels share the panel's status system, so they match the overview rows.
+
+  ## Dock and status widget
+
+  - `/ps:dock` (`expand`/`collapse`/`close`) and `/ps:pin`. Dock height is measured in log rows.
+  - The dock auto-unpins a killed focused process via `processes-changed`, so `/ps:kill` never has to touch the dock.
+  - Status widget (`widget.showStatusWidget`, off by default) renders a compact line of status dots under the editor, reflowing on resize.
+
+  ## Settings and migration
+
+  - `/ps:settings` covers process-list, output, dock, follow, status-widget, and interception options, persisted across sessions.
+  - Imports the legacy `process.json` on first run and migrates v0.9.4 settings forward to v0.10.0, preserving `widget.showStatusWidget`.
+  - Stamps migrated `processes.json` files with `version: "0.10.0"`, so future migrations can key off an explicit config version instead of inferring from shape.
+
+  ## Notifications
+
+  - Configurable events (`onSuccess`/`onFailure`/`onKilled`) with attention levels (`turn`/`context`/`ignore`). Defaults: `onKilled` = `context`, `blockBackgroundCommands` = `false`.
+  - Log-watch alerts fan out and are highlighted in the overlay; the dead `timeout` kind is removed.
+
+  ## Intentional changes
+
+  - Log watches match literally by default with one-shot `repeat: false` defaults.
+  - Process IDs are opaque; sorting, truncation, and color are UI concerns only.
+  - Managed processes keep running in detached process groups when pi is suspended (`Ctrl+Z`); log capture continues and match notifications deliver once pi is foregrounded.
+
+  ## Polish and runtime fixes
+
+  - Rate-limit delivered log-match notifications to 20 per minute across all processes, summarize suppressed matches, and cool down repeated matchers to 15 seconds.
+  - Share one `statusColor` / `statusDot` mapping across panel, overlay, dock, and widget; exited-success uses `✓`, and the widget collapses finished-success processes into a `✓ N done` summary.
+  - Clamp dock sidebar width to the longest active process name; truncate tab labels instead of padding.
+  - Drop the dock bottom border and fix a line-overflow crash on narrow terminals.
+  - Re-read dock widget config on each render so `/ps:settings` changes apply immediately.
+  - Reap old finished records from the manager.
+  - Preserve leading empty lines in tail-style log views.
+
+  ## Tooling
+
+  - Targets Pi 0.80.3. 508 unit tests and 6 e2e tests pass; typecheck and lint clean. Tests are excluded from published files.
+
+### Patch Changes
+
+- df8478b: Polish the dock chrome for a cleaner look.
+
+  - Drop the vertical side rails and corner borders.
+  - Use a single space of side padding instead of `│` rails.
+  - Keep a top bar with the title.
+  - In expanded mode, add a full-width rule between the process strip and the streaming logs.
+  - In collapsed mode, show only the header and a short log preview — no process strip.
+  - Leave the bottom open so the dock still sits flush against the editor.
+
+- 4d5b4d6: Fix issue #58: `process output` no longer persists raw stdout/stderr arrays in tool-result `details`. Output details now contain only metadata, including optional truncation info, while the bounded text preview is returned as tool-result `content`.
+- f0111d9: Limit delivered log-match notifications to 20 per minute across all processes, summarize suppressed matches, and increase repeated matcher cooldowns to 15 seconds. Lifecycle notifications remain exempt.
+
+## 0.9.4
+
+### Patch Changes
+
+- 96bbcd3: Fix cwd parameter being ignored on process start
+
+  The process tool always used the session working directory (ctx.cwd)
+  when spawning processes, ignoring the cwd parameter passed by the LLM.
+  This caused commands with relative paths to fail when a different
+  working directory was specified.
+
+## 0.9.3
+
+### Patch Changes
+
+- e812981: Relax Pi peer dependency ranges to avoid npm update conflicts in extension environments with older Pi package peers.
+
+## 0.9.2
+
+### Patch Changes
+
+- c2287ac: Leave one terminal column unused in the collapsed log dock so long process output does not wrap into the editor.
+
+## 0.9.1
+
+### Patch Changes
+
+- fbdf652: Refresh dependencies and migrate Pi imports to the `@earendil-works` namespace.
+- 7ccfa67: Sanitize terminal control characters before rendering process logs in the UI.
+
+## 0.9.0
+
+### Minor Changes
+
+- 8f15f76: Prevent crash on `/new` with running background processes
+
 ## 0.8.1
 
 ### Patch Changes
